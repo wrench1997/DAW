@@ -559,10 +559,7 @@ fn actual_whole_serial_other_automation_refuses_review_without_capture_or_model_
         .prepare_whole_song_export_review(options(&this.fixture), true)
         .err()
         .expect("non-Master automation remains unsupported");
-    assert!(
-        error.contains("only Master Volume/Pan/Mute automation"),
-        "{error}"
-    );
+    assert!(error.contains("only Master controls"), "{error}");
     assert_eq!(this.fixture.source_handle().capture_count(), captures);
     assert!(
         this.effects

@@ -634,7 +634,11 @@ impl IEditControllerTrait for Effect {
         (*info).id = id;
         (*info).defaultNormalizedValue = if id == 0 { 0.5 } else { 0.0 };
         (*info).flags = if id == 0 {
-            0
+            if cfg!(feature = "instrument-first") && self.instrument {
+                ParameterInfo_::ParameterFlags_::kCanAutomate as i32
+            } else {
+                0
+            }
         } else {
             ParameterInfo_::ParameterFlags_::kIsReadOnly as i32
         };

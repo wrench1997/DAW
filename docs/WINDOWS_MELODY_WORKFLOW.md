@@ -126,9 +126,11 @@ These paths must retain their own receipts and must not be substituted for each 
 The ordinary build explicitly refuses unsupported active-VST offline export.
 Experimental VST whole export requires `experimental-fresh-helper` on Linux or Windows.
 The supported VST path is one active source, optionally followed by one static,
-ordered serial FX chain. Master Volume/Pan/Mute automation also works on this path;
-additional sources, Tempo, non-Master and plug-in parameter automation, unsupported
-graphs and active partial-wet Inserts are rejected rather than omitted.
+ordered serial FX chain. Master Volume/Pan/Mute automation also works on this path.
+The separate, not-yet-qualified Generator candidate below adds source slot-0
+parameter automation at Q128 block starts. Additional sources, Tempo/Swing,
+native Channel/Mixer automation, Effect parameters, unsupported graphs and active
+partial-wet Inserts remain rejected rather than omitted.
 A fixed tail window requires explicit review; unknown/infinite tail retains its
 warning. General FX routing, graph PDC and full natural release remain open.
 
@@ -513,6 +515,90 @@ Upload was requested false, so only artifact upload was SKIPPED; user03 was not
 replaced. Full raw logs and actual API terminals are retained under
 `source128-*-actual-terminal-01.*` in the evidence parent. The original `3b79f14`
 failures remain separate; no assertion, timeout or release whitelist was relaxed.
+
+### Generator parameter Q128 candidate (2026-10-16; validation pending)
+
+The source implementation accepts `PluginParameter` automation only for the
+single source Generator's physical slot0. Stopped-source capture supplies the
+actual bounded catalog; every driven parameter must be writable and automatable,
+with finite normalized Project and captured-live f32 bases. The full Project
+still supplies the compiled identity/fingerprint. The clone restores captured
+live bases; the Timeline evaluator uses Project bases when an automation layer
+ends. Empty parameter sets preserve the old Instrument/Occurrence capture path.
+
+The renderer reuses the Timeline automation cursor and submits a complete
+parameter batch before MIDI and Process at each128-frame musical block start.
+This is block-rate, not sample-accurate parameter automation. The final partial
+music block advances only through its real music frames; fixed-tail processing
+holds the last actually submitted parameter values without an end/tail setter.
+Existing output-frame Master automation and its N−1 tail hold are unchanged.
+Effects/native Channel/Mixer parameters, Tempo/Swing and unsupported routing
+still refuse. Cancel, source fences, clone disposal and publication keep their
+existing owners and deadlines.
+
+The new ignored SDK exact is
+`app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm`.
+It first performs the ordinary catalog/Play/Stop/disk Save/fresh-App Open flow,
+then authors the new parameter lane. Thus the new lane's disk Save/Open recovery
+is not covered. Its independent96,768-frame stereo oracle applies Generator gain
+before the real32-frame FIFO, followed by two real FIR effects and one96-frame
+crop. Raw hold points127/130 and layer end385 discriminate Q128 sampling at
+128/256/512; separate255/256/257-frame traces check tail-write absence. It uses
+the genuine default Whole factory; detailed strict-child audit remains the
+retained separate audited exact.
+
+**Local software qualification passed; Git/cloud pending.** Independent review
+found the fixture Gain lacked `kCanAutomate`;
+only the instrument-first Instrument class now advertises it, with actual
+factory/controller and host-catalog assertions. The default Effect metadata and
+read-only probes stay unchanged. The feature bundle was rebuilt. Actual
+compile01 failed E0046 because a new test Backend omitted required latency/tail
+methods; source now supplies the fixture's two zero values. Artifact02 then
+compiled successfully in2m50s. The first cursor group passed5/failed2: an f32
+slip=.032 combined with f64 loop points reached the existing compiler's
+`AutomationRangeCollapsed` refusal, while a256-frame Tension test expected an
+analytic curve despite the compiler's2048-frame linear-span approximation.
+Only the new tests changed: exact binary125/250-frame loop/slip inputs and a
+4096-frame two-span independent oracle (at2048 the value is.0625, not.5).
+All seven cursor cases subsequently passed. This does not repair arbitrary
+non-binary slip or change the production compiler.
+
+The final64 directed cases, including19 new, actually passed; earlier34 capture
+and all four diagnostic parent exacts were reused, not rerun. Feature units9,
+default actual-controller metadata negative control1, feature strict Clippy and
+feature build passed. The new genuine Q128 SDK passed in11.79s with all96,768
+stereo PCM frames and original/cold source joins3+3. Retained genuine7.98s and
+audit7.99s also passed; only the latter directly audits strict3 natural reaps,
+max-live1 and Effect Offline1005. Root all-feature/all-target strict Clippy,
+no-default all-target and fmt exited0. All27 phase terminals (including the two
+preserved101 failures) and68 held-handle exit observations were consumed; every
+owned process/exec was reaped, no resource guard fired. The changed Review
+passed its actual WGPU exact1/5.54s at logical1440×900/1080×680 (this DPI
+produced1498×936/1123×707 pixels). Root inspected both real frames: changed
+text wraps, fixed-tail consent and actions remain readable/inside the window.
+PID68672 and its exec exited0/reaped; fresh heavy[]/reviewPID[] followed.
+This was display/surface-free Vulkan on RTX3060, not ordinary GUI/NI/device
+acceptance. New code's cloud execution remains pending.
+Evidence is under `generator-q128-automation-source-candidate-01/` in
+`target/backend-reliability-20261014/`.
+
+The later doc-only `84ca9f6` cloud result remains separate from accepted820cddb:
+[quality38884219131](https://github.com/wrench1997/DAW/actions/runs/38884219131)
+actually succeeded with2553 root/19ignored, both joint SDK cases and real
+session2 PrintWindow.
+[Preview38884219099](https://github.com/wrench1997/DAW/actions/runs/38884219099)
+failed two old runtime tests: process panic and parameter edit303 BackendPanicked
+each exhausted its original2-second receive deadline. App2486 passed/2failed/
+19ignored; release and ZIP did not run. Ordinary panic-hook execution begins
+before catch returns, but those logs do not establish the stalled boundary.
+Test-only four-phase timestamps and an isolated, releasable ordinary-hook child
+are being integrated without extending deadlines or suppressing failures. The
+child ownership correction retains a real Child/PID on uncertain reap and rejects
+replacement until actual exit. Its real-live-child negative control and the
+isolated ordinary-hook parent/child passed locally. Both old panic cases passed
+with `RUST_BACKTRACE=1` in their own execution; the historical cloud stalled
+boundary remains unproved. Original logs
+and terminals remain `source132-*-actual-terminal-01.*`.
 
 ### Master automation and source-checked publication (2026-10-16)
 

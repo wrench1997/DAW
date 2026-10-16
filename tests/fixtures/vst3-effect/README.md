@@ -152,8 +152,11 @@ fixture results.
 
 ### Disk Save and cold App Open with the default Instrument
 
-The optional `instrument-first` feature reverses only the two existing Factory
-class entries for a separately built bundle. The normal App can therefore load
+The optional `instrument-first` feature reverses the two existing Factory
+class entries for a separately built bundle. In the new Q128 candidate it also
+marks only that build's Instrument Gain as `kCanAutomate`; the default Effect
+metadata and all read-only probes retain their old flags. Actual Factory-created
+controllers and host-catalog assertions cover the distinction. The normal App can therefore load
 and reopen the Instrument as its default class without a test-only class override
 or a copied old runtime identity. The default Effect build/path is unchanged.
 
@@ -166,10 +169,28 @@ $env:CITRUS_MELODY_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Pat
 # Also keep CITRUS_EFFECT_FIXTURE set to the default Effect bundle above.
 ```
 
-The two App targets share the prefix
+The three App targets share the prefix
 `app::whole_song_export_job::melody_workflow_sdk_tests::`:
 - `actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm`
 - `actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`
+- `actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm`
+
+The third target has passed local CPU qualification, separately from the prior
+two-target acceptance below; new code cloud qualification remains pending.
+Rebuild the feature bundle before running it. It authors a
+Generator Gain lane after cold Open and compares all96,768 stereo output frames
+against gain-before-FIFO32 plus two FIR stages and one96-frame crop. Hold points
+127/130 and layer end385 exercise Q128 sampling at128/256/512. It does not prove
+that new lane's Save/Open persistence; separate255/256/257-frame traces check
+tail-write absence. The new SDK passed in11.79s; the rebuilt feature's9 units,
+actual default-controller metadata negative control1, feature Clippy,64 directed
+cases (19 new), retained genuine7.98s/audit7.99s and Root strict Clippy/no-default/
+fmt all passed. The actual two-size Review WGPU also passed1/5.54s and Root
+inspected both frames. The first E0046 Backend omission and cursor5PASS/2FAIL remain:
+the repaired new tests use valid binary loop/slip inputs and the compiler's
+existing2048-frame Tension spans, with no production compiler change. The seven
+cursor cases then passed. Logs, actual project/WAV and frozen inputs are under
+`generator-q128-automation-source-candidate-01/` in the workflow evidence parent.
 
 Stage the actual `cargo test --no-run --message-format=json` App test executable
 and that matching helper into a new private directory as siblings, then run the
@@ -179,7 +200,7 @@ Set `CITRUS_MELODY_HELPER` to the staged helper. Do not overwrite the common
 `target/debug/deps` helper or a user preview. CI performs this staging explicitly;
 the production `current_exe`-sibling helper resolver is unchanged.
 
-Both tests require actual audible callback Play, manual Stop/Save, original worker
+All three tests require actual audible callback Play, manual Stop/Save, original worker
 Join, fresh App disk Open, accepted opaque-state and generic-ACK checks, then the
 complete independent one-bar Whole PCM oracle: 96,000 music +768 fixed-tail frames,
 96 native-latency frames cropped once, 96,768 final stereo frames. The genuine

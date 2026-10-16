@@ -6,15 +6,61 @@ path. This document describes the ordinary renderer's fidelity and background-jo
 contract. The shared settings and level choices are in
 [WAV export options](WAV_EXPORT_OPTIONS.md).
 
-The experimental Linux/Windows path requires one active VST instrument at the
-current sample rate, static routing, no mixer insert slots, no other music/audio
-source and only Master Volume/Pan/Mute automation. It captures the stopped source
-and validates a separate strict clone before rendering. The review requires
-explicit acceptance of a fixed tail window; it does not detect silence or
-guarantee an arbitrary plugin's full natural release. See
-[Windows melody workflow](WINDOWS_MELODY_WORKFLOW.md) for supported scope and actual
-NOIRE evidence. Effects, general plugin-aware graph PDC, stems and complete
-live/offline parity remain outside that qualified scope.
+## Experimental VST Whole export
+
+The Linux/Windows `experimental-fresh-helper` path requires exactly one active
+VST3 Generator at the current sample rate and no other music/audio source. It
+supports optional fully wet VST3 effects in one static, ordered PostFader path to
+Master, plus sample-exact Master Volume/Pan/Mute automation. Stopped source state,
+bases, identities and DSP metadata are captured before separate strict clones
+render each stage. Cumulative native latency is removed once at the final output;
+this serial compensation does not implement general graph PDC.
+
+The current source also implements automation for the source Generator's physical
+slot 0. Driven `PluginParameter` targets need stored finite normalized Project
+bases, actual captured bases and an actual writable/automatable source catalog;
+the clone must match that catalog and verify restored values. The compiled
+Timeline supplies each raw Q128 block-start value before MIDI and DSP. This is
+block-rate, not sample-accurate within 128 frames. The fixed tail holds the last
+actually sent musical-block values without a tail parameter write. Its new SDK
+lane is authored after cold Open, so that case does not verify saving/reopening
+the new lane.
+
+**Current local validation:** the rebuilt test artifact and all 64 directed cases,
+including 19 new cases, passed. The genuine Q128 SDK run matched all 96,768 stereo
+frames against an independent Generator FIFO32/two-FX/single-96-frame-crop oracle;
+the retained genuine and audited SDK cases also passed. Fixture validation passed
+9 feature unit tests, the default-factory metadata negative control, strict fixture
+Clippy and the feature-bundle rebuild. Root strict Clippy/no-default/fmt also passed.
+The changed Review's real two-size WGPU check passed1/5.54s and both frames were
+inspected; new-code cloud acceptance remains pending.
+
+The first compile failed with E0046 for missing test-backend latency/tail methods;
+those methods were added before the successful rebuild. The first cursor group
+had 5 passes/2 failures: f32 loop/slip beats hit the existing
+`AutomationRangeCollapsed` guard, and the Tension oracle used the wrong span.
+Only new tests changed to exact binary beats and a 4096-frame piecewise oracle;
+all 7 cursor cases then passed. Production behavior was unchanged by these fixes.
+
+Branches, sends, sidechains, off-path Inserts (including disabled/bypassed ones),
+active partial-wet Inserts, additional sources, Effect/other-instance parameter
+automation, native Channel/non-Master Mixer controls, Tempo and Swing are refused,
+not omitted. The review requires explicit acceptance of a fixed tail window; it
+does not detect silence or guarantee a plugin's full natural release. Stems and
+complete live/offline parity remain open.
+
+**Verified baseline:** at `820cddb`, genuine default-factory and separately audited
+SDK melody workflows passed complete 96,768-frame stereo PCM comparisons through
+Play, disk Save, fresh App Open and serial Whole export. Both quality and preview
+passed. The later documentation revision `84ca9f6` passed quality but failed preview
+in two existing panic-wait tests; its release/package steps did not run. These are
+not new Generator-automation or NOIRE acceptance. See
+[Windows melody workflow](WINDOWS_MELODY_WORKFLOW.md) for exact runs and remaining
+local NOIRE state, GUI and device checks.
+
+Selected MIDI-to-audio conversion retains its own source-validation and history
+contract. Realtime Master Capture records the live Master result. Neither operation
+substitutes for Whole offline export.
 
 ## Fidelity preflight
 

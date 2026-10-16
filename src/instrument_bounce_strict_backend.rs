@@ -73,6 +73,8 @@ pub(crate) struct StrictBackend {
     /// Preparation evidence only, never an edit-generation or metadata lease.
     prepared_dirty_revision: Option<u64>,
     prepared_async_revision: Option<u64>,
+    generator_catalog: Option<crate::instrument_bounce::GeneratorAutomationCatalog>,
+    generator_automation_ids: Vec<u32>,
 }
 
 impl StrictBackend {
@@ -106,6 +108,8 @@ impl StrictBackend {
             cleanup_diagnostics: Vec::new(),
             prepared_dirty_revision: None,
             prepared_async_revision: None,
+            generator_catalog: None,
+            generator_automation_ids: Vec::new(),
         }
     }
     #[cfg(test)]
@@ -295,6 +299,24 @@ impl StrictBackend {
         if snapshot.async_started_revision != expected {
             return Err(Self::admission(
                 "Strict clone async-state restoration changed after preparation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_generator_catalog(&mut self) -> Result<(), BackendFailure> {
+        if self.generator_catalog.is_none() {
+            return Ok(());
+        }
+        let parameters =
+            self.exchange_at("render.generator_automation.catalog", Client::parameters)?;
+        let actual = effect::bounded_catalog(parameters)?;
+        if !effect::catalog_schema_matches(
+            &actual,
+            &self.generator_catalog.as_ref().unwrap().parameters,
+        ) {
+            return Err(Self::admission(
+                "Whole Generator automation catalog changed",
             ));
         }
         Ok(())
@@ -802,6 +824,29 @@ impl RenderBackend for StrictBackend {
             // This does not attest every parameter internal to the instrument.
             if !capture.state.parameter_bases.is_empty() {
                 let catalog = self.exchange_at("prepare.parameters", Client::parameters)?;
+                if !capture.plan().generator_automation_ids().is_empty() {
+                    let source =
+                        capture
+                            .plan()
+                            .generator_automation_catalog()
+                            .ok_or_else(|| {
+                                Self::admission("Whole Generator source catalog is absent")
+                            })?;
+                    source
+                        .validate(capture.plan().generator_automation_ids())
+                        .map_err(Self::admission)?;
+                    if !effect::catalog_schema_matches(
+                        &effect::bounded_catalog(catalog.clone())?,
+                        &source.parameters,
+                    ) {
+                        return Err(Self::admission(
+                            "Clone Generator automation catalog differs from actual source",
+                        ));
+                    }
+                    self.generator_catalog = Some(source.clone());
+                    self.generator_automation_ids =
+                        capture.plan().generator_automation_ids().to_vec();
+                }
                 // Validate the entire captured base set before the first mutation.
                 for id in capture.state.parameter_bases.keys() {
                     if !catalog
@@ -835,6 +880,7 @@ impl RenderBackend for StrictBackend {
                 }
             }
             let metadata = self.read_metadata(true)?;
+            self.verify_generator_catalog()?;
             if &metadata != capture.metadata() {
                 return Err(Self::admission(
                     "Fresh strict clone metadata differs from authoritative capture",
@@ -873,6 +919,7 @@ impl RenderBackend for StrictBackend {
         let result = (|| {
             self.ready()?;
             self.verify_armed_async_state()?;
+            self.verify_generator_catalog()?;
             let metadata = self.read_metadata(false)?;
             self.verify_armed_async_state()?;
             Ok(metadata)
@@ -928,6 +975,45 @@ impl RenderBackend for StrictBackend {
         #[cfg(test)]
         observation.strict_result(Operation::StrictMidi, None, None, &result);
         result
+    }
+    fn set_automated_parameters(&mut self, values: &[(u32, f32)]) -> Result<(), BackendFailure> {
+        self.ready()?;
+        if values.len() != self.generator_automation_ids.len()
+            || !values
+                .iter()
+                .map(|(id, _)| *id)
+                .eq(self.generator_automation_ids.iter().copied())
+            || values
+                .iter()
+                .any(|(_, value)| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            return Err(Self::admission(
+                "Unadmitted Whole Generator Q128 parameter write",
+            ));
+        }
+        self.verify_armed_async_state()?;
+        self.verify_generator_catalog()?;
+        for &(id, value) in values {
+            self.exchange_at(
+                "render.generator_automation.set_parameter",
+                |client, deadline| client.set_parameter(id, value, deadline),
+            )?;
+        }
+        // Verify the whole batch after its last setter: cross-parameter side
+        // effects cannot hide behind an earlier successful controller readback.
+        for &(id, value) in values {
+            let actual = self.exchange_at(
+                "render.generator_automation.readback",
+                |client, deadline| client.parameter(id, deadline),
+            )?;
+            if !strict_offline::captured_base_matches(actual, value) {
+                return Err(Self::admission(format!(
+                    "Generator Q128 parameter {id} readback differs: {actual:?} != {value:?}"
+                )));
+            }
+        }
+        self.verify_generator_catalog()?;
+        self.verify_armed_async_state()
     }
     fn process(
         &mut self,

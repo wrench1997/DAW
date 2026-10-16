@@ -43,6 +43,8 @@ use vst3_host::strict_offline as strict;
 use vst3_host::{MetadataQueryRejection, strict_offline::FailureKind as StrictKind};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+#[path = "generator_q128_strict_backend_tests.rs"]
+mod generator_q128;
 const UID: &str = "ABCDEF019182FAEB566D624153675854";
 const SENTINEL: &[u8] = b"unchanged destination";
 
@@ -116,6 +118,7 @@ counts = {}
 processed = 0
 sets = []
 reads = []
+automation_values = {base[0]: base[1] for base in cfg['bases']}
 audio_activation = {}
 progress_revision = 0
 progress_armed = None
@@ -345,8 +348,11 @@ while True:
         response = {'NativeDirtyRevision': {'revision': 77}}
     elif name == 'GetAllParameters':
         params = [parameter(17), parameter(23)]
+        if cfg.get('generator_automation', False):
+            for param in params: param['value'] = automation_values[param['id']]
         if fault == 'catalog_missing': params.pop()
         if fault == 'catalog_readonly': params[1]['is_read_only'] = True
+        if fault == 'catalog_not_automatable': params[1]['can_automate'] = False
         if fault == 'catalog_duplicate': params.append(parameter(17))
         if fault == 'catalog_limit': params = [parameter(index) for index in range(4097)]
         if fault == 'catalog_max': params = [parameter(index) for index in range(4096)]
@@ -354,16 +360,22 @@ while True:
         if fault == 'catalog_unit_limit': params[0]['unit'] = 'x' * 1025
         response = {'Parameters': {'params': params}}
     elif name == 'SetParameter':
-        assert [args['id'], args['value']] == cfg['bases'][len(sets)], args
-        assert not reads, 'setter after readback'
+        if cfg.get('generator_automation', False):
+            assert args['id'] in automation_values, args
+            automation_values[args['id']] = args['value']
+            if fault == 'automation_cross_parameter': automation_values[17] = .99
+        else:
+            assert [args['id'], args['value']] == cfg['bases'][len(sets)], args
+            assert not reads, 'setter after readback'
         sets.append(args['id'])
         response = success
     elif name == 'GetParameter':
-        assert sets == [base[0] for base in cfg['bases']], sets
-        assert args['id'] == cfg['bases'][len(reads)][0], args
+        if not cfg.get('generator_automation', False):
+            assert sets == [base[0] for base in cfg['bases']], sets
+            assert args['id'] == cfg['bases'][len(reads)][0], args
         reads.append(args['id'])
         # Deliberately different raw f64 that projects to the same captured f32.
-        value = .1 if args['id'] == 17 else .75
+        value = automation_values[args['id']] if cfg.get('generator_automation', False) else (.1 if args['id'] == 17 else .75)
         if fault == 'base_mismatch': value = .100001
         if fault == 'base_negative': value = -.001
         if fault == 'base_above_one': value = 1.001

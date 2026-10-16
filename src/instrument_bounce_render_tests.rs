@@ -10,6 +10,9 @@ use std::{
     thread,
 };
 
+#[path = "generator_q128_automation_tests.rs"]
+mod generator_automation;
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 fn control() -> RenderControl {
     RenderControl {

@@ -428,7 +428,7 @@ fn source_configuration_matches(
         && actual.tail_samples == source.tail_samples
 }
 
-fn bounded_catalog(
+pub(super) fn bounded_catalog(
     parameters: Vec<Parameter>,
 ) -> Result<Vec<PluginParameterDescriptor>, BackendFailure> {
     if parameters.len() > MAX_PLUGIN_PARAMETER_CATALOG_ITEMS {
@@ -479,7 +479,7 @@ fn truncate_text(text: &mut String, maximum_bytes: usize) {
     text.truncate(end);
 }
 
-fn catalog_schema_matches(
+pub(super) fn catalog_schema_matches(
     actual: &[PluginParameterDescriptor],
     source: &[PluginParameterDescriptor],
 ) -> bool {

@@ -1350,6 +1350,15 @@ impl Vst3Backend {
         parameter_ids: &[u32],
         fence: &BounceCaptureFence,
     ) -> Result<BouncePluginState, BounceCaptureError> {
+        self.capture_bounce_state_inner(parameter_ids, fence, false)
+    }
+
+    fn capture_bounce_state_inner(
+        &mut self,
+        parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
+        automated: bool,
+    ) -> Result<BouncePluginState, BounceCaptureError> {
         use BounceCaptureError::{BackendFailed, Rejected};
         fence.checkpoint()?;
         if !self.prepared || self.last_transport.playing {
@@ -1386,10 +1395,15 @@ impl Vst3Backend {
         }
         let mut parameter_bases = BTreeMap::new();
         if !parameter_ids.is_empty() {
-            let (_, catalog) = super::validate_catalog_snapshot(capture_call(Some(fence), || {
-                self.parameter_catalog_snapshot().map_err(BackendFailed)
-            })?)
-            .map_err(Rejected)?;
+            let catalog = if automated {
+                self.private_generator_automation_catalog(fence)?.parameters
+            } else {
+                super::validate_catalog_snapshot(capture_call(Some(fence), || {
+                    self.parameter_catalog_snapshot().map_err(BackendFailed)
+                })?)
+                .map_err(Rejected)?
+                .1
+            };
             for &id in parameter_ids {
                 if !catalog
                     .iter()
@@ -1437,6 +1451,152 @@ impl Vst3Backend {
             native_generation: before.generation,
             native_dirty_revision: revision,
         })
+    }
+
+    pub(super) fn capture_automated_bounce_state(
+        &mut self,
+        parameter_ids: &[u32],
+        automation_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<
+        (
+            BouncePluginState,
+            crate::instrument_bounce::GeneratorAutomationCatalog,
+        ),
+        BounceCaptureError,
+    > {
+        use BounceCaptureError::Rejected;
+        fence.checkpoint()?;
+        if !self.prepared || self.last_transport.playing {
+            return Err(Rejected(
+                "Instrument bounce source has not reached stopped processing".into(),
+            ));
+        }
+        let before = self.private_generator_automation_catalog(fence)?;
+        before.validate(automation_ids).map_err(Rejected)?;
+        let state = self.capture_bounce_state_inner(parameter_ids, fence, true)?;
+        // Read-only meters may move at rest; current values are not catalog
+        // schema. The original capture separately brackets requested bases/state.
+        if !before.same_schema(&self.private_generator_automation_catalog(fence)?) {
+            return Err(Rejected(
+                "Whole Generator catalog changed during private capture".into(),
+            ));
+        }
+        fence.checkpoint()?;
+        Ok((state, before))
+    }
+
+    fn private_generator_automation_catalog(
+        &mut self,
+        fence: &BounceCaptureFence,
+    ) -> Result<crate::instrument_bounce::GeneratorAutomationCatalog, BounceCaptureError> {
+        // Keep remote/SDK errors distinct from a healthy catalog exceeding this
+        // new contract. The ordinary Instrument entry retains its old API.
+        let parameters = capture_call(Some(fence), || {
+            self.plugin
+                .get_parameters()
+                .map_err(|error| BounceCaptureError::BackendFailed(error.to_string()))
+        })?;
+        generator_automation_catalog(parameters)
+    }
+}
+
+#[cfg(feature = "vst3")]
+fn generator_automation_catalog(
+    parameters: Vec<vst3_host::Parameter>,
+) -> Result<crate::instrument_bounce::GeneratorAutomationCatalog, BounceCaptureError> {
+    use BounceCaptureError::Rejected;
+    if parameters.len() > super::MAX_PLUGIN_PARAMETER_CATALOG_ITEMS {
+        return Err(Rejected(
+            "Whole Generator source catalog exceeds its bounded capture contract".into(),
+        ));
+    }
+    let mut catalog = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        if !parameter.value.is_finite()
+            || !(0.0..=1.0).contains(&parameter.value)
+            || !parameter.default.is_finite()
+            || !(0.0..=1.0).contains(&parameter.default)
+        {
+            return Err(Rejected(
+                "Whole Generator source catalog contains an invalid normalized value".into(),
+            ));
+        }
+        let mut descriptor = super::PluginParameterDescriptor {
+            id: parameter.id,
+            name: parameter.name,
+            unit: parameter.unit,
+            current_normalized: parameter.value as f32,
+            default_normalized: Some(parameter.default as f32),
+            step_count: u32::try_from(parameter.step_count).ok(),
+            automatable: parameter.can_automate,
+            read_only: parameter.is_read_only,
+            bypass: parameter.is_bypass,
+        };
+        super::bound_parameter_descriptor(&mut descriptor);
+        catalog.push(descriptor);
+    }
+    catalog.sort_by_key(|p| p.id);
+    let catalog = crate::instrument_bounce::GeneratorAutomationCatalog {
+        revision: super::parameter_catalog_revision(&catalog),
+        parameters: catalog,
+    };
+    catalog.validate(&[]).map_err(Rejected)?;
+    Ok(catalog)
+}
+
+#[cfg(all(test, feature = "vst3"))]
+mod generator_catalog_tests {
+    use super::*;
+    fn parameter(id: u32) -> vst3_host::Parameter {
+        vst3_host::Parameter {
+            id,
+            name: format!("P{id}"),
+            value: 0.25,
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            unit: String::new(),
+            step_count: 0,
+            can_automate: true,
+            is_read_only: false,
+            is_bypass: false,
+            flags: 0,
+        }
+    }
+    #[test]
+    fn generator_catalog_capacity_duplicate_and_raw_invalid_values_are_healthy_refusals() {
+        for raw in [
+            vec![parameter(0); super::super::MAX_PLUGIN_PARAMETER_CATALOG_ITEMS + 1],
+            vec![parameter(0), parameter(0)],
+            vec![vst3_host::Parameter {
+                value: f64::NAN,
+                ..parameter(0)
+            }],
+            vec![vst3_host::Parameter {
+                default: 1.01,
+                ..parameter(0)
+            }],
+        ] {
+            assert!(matches!(
+                generator_automation_catalog(raw),
+                Err(BounceCaptureError::Rejected(_))
+            ));
+        }
+    }
+    #[test]
+    fn generator_catalog_schema_excludes_live_meters_but_keeps_writable_metadata() {
+        let first = generator_automation_catalog(vec![parameter(1), parameter(0)]).unwrap();
+        let mut changed = first.clone();
+        changed.parameters[0].current_normalized = 0.875;
+        assert!(first.same_schema(&changed));
+        changed.parameters[0].automatable = false;
+        assert!(!first.same_schema(&changed));
+        assert!(changed.validate(&[0]).is_err());
+        assert_eq!(
+            first.parameters.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 }
 

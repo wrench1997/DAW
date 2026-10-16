@@ -603,7 +603,37 @@ fn assert_default_loaded(f: &WorkflowApp, ids: [u64; 3]) {
     }
 }
 
-fn independent_pcm() -> Vec<[f32; 2]> {
+fn configure_generator_q128(project: &mut Project, instance: u64) {
+    use crate::automation::{AutomationCurve, AutomationLane, AutomationPoint, AutomationTarget};
+    let mut lane = AutomationLane::new(AutomationTarget::PluginParameter {
+        instance,
+        parameter: 0,
+    });
+    lane.set_curve(AutomationCurve::Hold);
+    let beat = |frame: u64| frame as f64 / 24_000.0;
+    lane.replace_points([
+        AutomationPoint::new(0.0, 0.25),
+        AutomationPoint::new(beat(127), 0.75),
+        AutomationPoint::new(beat(130), 0.5),
+    ]);
+    project
+        .automation_lanes
+        .push(crate::model::ProjectAutomation {
+            id: 0xF101,
+            name: "Source Generator Q128 gain".into(),
+            lane,
+        });
+    let mut clip = project.clips[0].clone();
+    clip.id = 0xF101;
+    clip.kind = ClipKind::Automation;
+    clip.automation_id = Some(0xF101);
+    clip.start = 0.0;
+    clip.length = beat(385) as f32;
+    clip.source_offset = 0.0;
+    project.clips.push(clip);
+}
+
+fn independent_pcm(generator_automation: bool) -> Vec<[f32; 2]> {
     // Notes at [0,N/4) and [N/2,N), true MIDI fixture32 FIFO,
     // two FIR32/160 Effects, actual callback control order, one final crop96.
     let generated = GENERATED;
@@ -619,7 +649,19 @@ fn independent_pcm() -> Vec<[f32; 2]> {
         } else {
             0.0
         };
-        let left = GAINS[0] * level;
+        // Independent Q128 oracle: changes at 127/130 and placement end385
+        // become actual writes only at128/256/512, before the source FIFO.
+        let gain = if !generator_automation {
+            GAINS[0]
+        } else {
+            match j / 128 {
+                0 => 0.25,
+                1 => 0.75,
+                2 | 3 => 0.5,
+                _ => GAINS[0],
+            }
+        };
+        let left = gain * level;
         *sample = [left, -0.5 * left];
         sample[0] = sample[0].clamp(-8.0, 8.0) * 0.75 * 1.0;
         sample[1] = sample[1].clamp(-8.0, 8.0) * 0.75 * 0.75;
@@ -651,16 +693,22 @@ fn independent_pcm() -> Vec<[f32; 2]> {
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; no device, GUI or installed fallback"]
 fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm() {
-    run_saved_melody_workflow(WorkflowRenderer::ClosedReadOnlyAudit);
+    run_saved_melody_workflow(WorkflowRenderer::ClosedReadOnlyAudit, false);
 }
 
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; genuine default Whole factory, no device, GUI or installed fallback"]
 fn actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm() {
-    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction);
+    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction, false);
 }
 
-fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
+#[test]
+#[ignore = "explicit source-built Instrument-first + Effect bundles and matching sibling helper; genuine Whole Generator Q128 automation DSP, no device/GUI/installed fallback"]
+fn actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm() {
+    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction, true);
+}
+
+fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: bool) {
     let genuine_factory = matches!(renderer, WorkflowRenderer::GenuineProduction);
     let _helper_admission = plugins::helper_transport_test_lock();
     check_helper_sibling();
@@ -749,6 +797,27 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
     // Default component/controller setup may legitimately accept default state.
     // Preserve its actual baseline instead of assuming zero initialization calls.
     let warm_generator_catalog = catalogue(&mut first, ids[0]);
+    if generator_automation {
+        let gain = warm_generator_catalog.iter().find(|p| p.id == 0).unwrap();
+        assert!(
+            gain.automatable && !gain.read_only,
+            "Actual Instrument-first SDK Gain must advertise writable kCanAutomate: {gain:?}"
+        );
+        assert!(
+            warm_generator_catalog
+                .iter()
+                .filter(|p| p.id >= 1000)
+                .all(|p| p.read_only && !p.automatable),
+            "Read-only fixture probes must not advertise automation"
+        );
+        assert_eq!(
+            warm_generator_catalog
+                .iter()
+                .filter(|p| p.id >= 1000)
+                .count(),
+            9
+        );
+    }
     let warm_opaque = generator_opaque_restore_proof(&warm_generator_catalog);
     assert_ne!(warm_opaque.1.to_bits(), GAINS[0].to_bits());
     first.app_mut().plugin_parameter_editor = None;
@@ -921,9 +990,18 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
         );
     }
     assert_eq!(project_fingerprint(&cold.app().project), saved_fingerprint);
-    let before_render = serde_json::to_vec(&cold.app().project).unwrap();
-    assert_eq!(before_render, saved_project_bytes);
     assert_persisted_melody(&cold.app().project);
+    let mut render_project = saved.clone();
+    if generator_automation {
+        // Author this new capability on the actually opened cold Project. Save/Open
+        // and its already-qualified opaque proof above retain their original inputs.
+        configure_generator_q128(&mut cold.app_mut().project, ids[0]);
+        configure_generator_q128(&mut render_project, ids[0]);
+        cold.app_mut().request_immediate_timeline_compile();
+        cold.until(WorkflowApp::ready);
+    }
+    let before_render = serde_json::to_vec(&cold.app().project).unwrap();
+    assert_eq!(before_render, serde_json::to_vec(&render_project).unwrap());
     let options = WavExportOptions {
         sample_rate: RATE,
         sample_format: WavSampleFormat::Float32,
@@ -1054,7 +1132,7 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
         audit.assert_natural_serial_reaps(&ids, job.render_deadline.unwrap());
     }
     let wav = crate::wav::read_wav(&wav_path).unwrap();
-    let expected = independent_pcm();
+    let expected = independent_pcm(generator_automation);
     assert_eq!(
         (
             wav.metadata.sample_rate,
@@ -1116,7 +1194,13 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
     for owner in &cold_owners {
         assert_joined(owner);
     }
-    if genuine_factory {
+    if generator_automation {
+        eprintln!(
+            "REAL_WHOLE_GENERATOR_Q128_AUTOMATION_PASS render_factory=default_production; actual_source_catalog=writable_automatable; project_and_captured_bases=f32_present; quantum=128; musical_parameter_sampling=raw_block_start_before_MIDI_Process; subquantum_points=127_130; placement_end=385; applied_boundaries=128_256_512; fixed_tail=hold_last_sent_music_quantum; Master_tail=N_minus_1_unchanged; setter_ACK_is_not_DSP_evidence; full_independent_SDK_PCM=true; strict_child_pid_audit=false; old_source_joined=3; cold_source_joined=3; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; output={}",
+            MUSIC + TAIL,
+            directory.display()
+        );
+    } else if genuine_factory {
         eprintln!(
             "REAL_APP_MELODY_SAVE_COLD_OPEN_GENUINE_WHOLE_FACTORY_PASS live_source_sdk_process_calls=positive_each; generic_base_contract=f32_ack; state=40_each; cold_generator_opaque=accepted_state_function_and_saved_gain_readonly_proof; old_app_dropped=true; old_source_joined=3; cold_init_exact_ack=3; cold_source_joined=3; source_class_selector=None_both; registry_reused=false; render_factory=default_production; genuine_whole_production_factory_selected=true; completion=typed_Complete_after_termination_ACK_and_admission_drained; strict_child_pid_audit=false; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; full_independent_pcm=true; output={}",
             MUSIC + TAIL,

@@ -9,7 +9,9 @@
 
 代码`820cddb098969b35c98a5d976220feff340e160d`现已首轮实际双SUCCESS：quality38880415806、preview38880415815。2553 root/19ignored、strict Clippy/no-default/双bin与显式App SDK5通过；新默认工厂exact12.64s及旧audit12.32s均完整96768帧一致。真实Default/session2 PrintWindow PASS；preview372Python=360PASS/12条件SKIP、staticCRT release8m25s、精确ZIP/PE/import/provenance及提取helper通过，upload=false→仅上传SKIPPED。四文件窄修的276本机回归和全部收尾已通过；原6050失败仍保留，clip原5s只增加阶段诊断，重过不证明旧超时根因。默认工厂与审计的独立观测、实际EOF阶段证据不混用。
 
-后续Generator Q128自动化仍为独立未验收源码，不包含在820cddb中；用户03/NI/声卡继续不操作。
+后续Generator Q128自动化已完成独立候选的本机软件验收，不包含在820cddb中；新代码云端与NOIRE实机尚未验收。仅支持源Generator物理slot0、实际catalog确认可写且可自动化的参数，按128帧音乐块首更新；尾音保持最后实际发送值，不冒充逐样本自动化。新SDK在冷Open后才添加该lane，不能证明这条新lane的保存重开。首编译E0046及cursor原5PASS/2FAIL完整保留；补测试Backend零metadata、修新用例的f32 slip/2048分段前提后，64定向（含19新增）、4诊断parent、feature9/defaultmetadata负对照1、新genuineSDK11.79s及旧genuine7.98s/audit7.99s均实际通过。新SDK完整96768 stereo PCM，原/冷App各3源Join；root严格Clippy/no-default/fmt均0。changed Review真实双尺寸WGPU1PASS/5.54s，Root检查两帧控件/换行/固定尾音consent均完整；新代码云验收待完成。用户03/NI/声卡继续不操作。
+
+文档提交84ca9f6的后续云运行并非双绿：quality38884219131实际SUCCESS，2553 root/19ignored、两条联合SDK及真实session2 PrintWindow通过；preview38884219099实际FAIL，App2486PASS/2FAIL/19ignored，旧process-panic和parameter-panic测试各在原2秒等待超时，release/ZIP未执行。新增测试专用四阶段诊断与隔离普通panic-hook回归保留原期限/失败断言；独立审查发现的子进程owner丢失风险已在私有增量修正，待集成实测。旧日志只证明panic已开始，未证明hook、catch或结果发布的哪一步停住，不先认定生产DSP丢输出。
 
 后台联合测试已由代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`实际云验收：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。quality38863519248与preview38863519233均首轮SUCCESS：2552 root/18ignored、fixture8/9、builder11、显式App SDK4及strict门通过；新联合SDK云12.64s通过，96帧单次crop/768固定尾音/3strict自然reap/Effect实际Offline保持。Windows真实session2 PrintWindow PASS，非SKIP；preview372Python=360PASS/12条件SKIP、staticCRT release7m53s/ZIP/提取helper通过，upload=false。
 

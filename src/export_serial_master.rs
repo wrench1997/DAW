@@ -44,8 +44,12 @@ impl StaticSerialMasterPlan {
                 .iter()
                 .all(|lane| !lane.lane.is_enabled()
                     || lane.lane.points().is_empty()
-                    || crate::instrument_bounce::master_song_automation_target(lane.lane.target())),
-            "Serial Whole supports only Master Volume/Pan/Mute automation"
+                    || crate::instrument_bounce::whole_song_automation_target(
+                        project,
+                        channel_id,
+                        lane.lane.target()
+                    )),
+            "Serial Whole supports only Master controls and source Generator Q128 parameter automation with stored bases"
         );
         let graph = compile_mixer_graph(project)?;
         let mut channels = project.channels.iter().filter(|c| c.id == channel_id);

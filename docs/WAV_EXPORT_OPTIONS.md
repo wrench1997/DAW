@@ -55,10 +55,32 @@ automation. Active VST instruments/effects, sidechains and other active automati
 are rejected before choosing a destination and again in the renderer.
 
 With `experimental-fresh-helper`, eligible Linux/Windows projects can instead
-enter the experimental whole-song path: exactly one active VST instrument at the
-current sample rate, static routing, no mixer insert slots, no other music/audio
-source, and only Master Volume/Pan/Mute automation. Unsupported projects are
-refused, not rendered with missing sources or effects.
+enter experimental Whole export: exactly one active VST3 Generator at the current
+sample rate, no other music/audio source, optional fully wet VST3 effects in one
+static ordered PostFader chain to Master, and sample-exact Master Volume/Pan/Mute
+automation. Captured source state/bases and strict clones guard every stage;
+cumulative native latency is cropped once. General graph PDC remains unsupported.
+
+The current source adds source-Generator physical-slot-0 `PluginParameter`
+automation, guarded by stored/captured finite normalized bases, actual writable
+and automatable catalog metadata, clone identity and restored-value checks.
+Parameters use raw Q128 block-start values before MIDI/DSP, not sample-accurate
+changes within a block. The fixed tail holds the last values actually sent in a
+musical block and sends no new tail parameter values. Recompilation, all 64
+directed cases (19 new), the genuine Q128 full-PCM SDK run and retained SDK cases
+passed locally. Initial test-backend compile and cursor-oracle failures were
+repaired in tests, not production behavior; details are in the
+[offline export workflow](OFFLINE_EXPORT_WORKFLOW.md). Root strict Clippy/no-default/
+fmt and actual two-size Review WGPU passed; both frames were inspected.
+New-code cloud acceptance remains pending. The new SDK
+lane is authored after cold Open; its persistence is not established by that test.
+
+Branches, sends, sidechains, off-path Inserts (even disabled/bypassed), active
+partial-wet Inserts, additional sources, Effect/other-instance parameter
+automation, native Channel/non-Master Mixer controls, Tempo and Swing remain
+refused, not rendered with missing sources, effects or controls. The verified
+serial-FX/Master baseline and current Generator-automation validation status are
+separate; see [offline export workflow](OFFLINE_EXPORT_WORKFLOW.md).
 
 The VST review requires acceptance of the chosen fixed tail window. Unknown or
 longer plugin tails may be truncated; export does not detect acoustic silence.

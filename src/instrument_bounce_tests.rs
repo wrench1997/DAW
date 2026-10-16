@@ -8,6 +8,9 @@ use crate::instrument_bounce::{
 };
 use std::collections::BTreeMap;
 
+#[path = "generator_automation_capture_tests.rs"]
+mod generator_automation_capture;
+
 fn state() -> BouncePluginState {
     BouncePluginState {
         metadata: BouncePluginMetadata {
@@ -131,6 +134,7 @@ fn bounce_worker_capture_has_no_normal_state_or_native_publication() {
         &AtomicU64::new(7),
         true,
         &[17],
+        &[],
         &AtomicU32::new(0),
         &mut slots,
         &mut events,
@@ -175,6 +179,7 @@ fn bounce_worker_rejects_stale_nonquiescent_editor_and_pending_edit_without_capt
             &AtomicU64::new(if case == 1 { 8 } else { 7 }),
             case != 2,
             &[17],
+            &[],
             &AtomicU32::new(u32::from(case == 5)),
             &mut slots,
             &mut events,
@@ -205,6 +210,7 @@ fn bounce_epoch_changes_after_capture_never_publish_success() {
         &epoch,
         true,
         &[17],
+        &[],
         &AtomicU32::new(0),
         &mut slots,
         &mut events,
@@ -233,6 +239,7 @@ fn bounce_backend_failure_stays_visible_but_capture_rejection_does_not_fault() {
                 &AtomicU64::new(7),
                 true,
                 &[17],
+                &[],
                 &AtomicU32::new(0),
                 &mut slots,
                 &mut events,
@@ -272,6 +279,7 @@ fn bounce_capture_failure_republishes_inactive_identity_when_fault_event_is_lost
             &AtomicU64::new(7),
             true,
             &[17],
+            &[],
             &AtomicU32::new(0),
             &mut slots,
             &mut events,
@@ -339,6 +347,7 @@ fn bounce_receiver_drop_keeps_admission_until_queued_worker_lease_terminates() {
         &AtomicU64::new(7),
         true,
         &[17],
+        &[],
         &AtomicU32::new(0),
         &mut slots,
         &mut events,
@@ -462,6 +471,7 @@ fn bounce_expired_queued_request_has_no_backend_calls_and_panic_unwinds_lease() 
         &AtomicU64::new(7),
         true,
         &[17],
+        &[],
         &AtomicU32::new(0),
         &mut slots,
         &mut events,
@@ -520,6 +530,7 @@ fn bounce_cancel_during_capture_preserves_real_failure_and_panic_as_reliable_fau
             &AtomicU64::new(7),
             true,
             &[17],
+            &[],
             &AtomicU32::new(0),
             &mut slots,
             &mut events,
@@ -611,6 +622,7 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
         .send(Ok(BounceStateReceipt {
             epoch: 7,
             state: state(),
+            automation_catalog: None,
         }))
         .unwrap();
     assert!(capture.poll(stamp, status(), now).unwrap().is_none());
@@ -654,6 +666,7 @@ fn bounce_coordinator_retains_cancel_timeout_stale_and_disconnect_until_worker_a
                 .send(Ok(BounceStateReceipt {
                     epoch: if case == 2 { 8 } else { 7 },
                     state: state(),
+                    automation_catalog: None,
                 }))
                 .unwrap();
         }
@@ -1234,7 +1247,7 @@ fn master_song_prepare_refuses_every_active_source_mixer_plugin_and_transport_co
         AutomationTarget::MixerMute { track: 1 },
         AutomationTarget::PluginParameter {
             instance: 41,
-            parameter: 17,
+            parameter: 18,
         },
         AutomationTarget::MixerVolume { track: 0 },
     ];
@@ -1516,6 +1529,60 @@ fn master_song_admission_leaves_legacy_and_occurrence_automation_rejection_uncha
         )
         .unwrap()
         .is_master_song()
+    );
+}
+
+#[test]
+fn whole_generator_automation_admits_only_exact_source_with_project_base_and_keeps_legacy_refusal()
+{
+    use crate::automation::AutomationTarget;
+    let mut p = master_song_project();
+    p.automation_lanes.push(master_song_lane(
+        84,
+        AutomationTarget::PluginParameter {
+            instance: 41,
+            parameter: 17,
+        },
+        0.0,
+        1.0,
+    ));
+    let bytes = serde_json::to_vec(&p).unwrap();
+    let plan = InstrumentBouncePlan::prepare_master_song(&p, 1, 48_000, 0).unwrap();
+    assert_eq!(plan.generator_automation_ids(), [17]);
+    assert!(plan.generator_automation_catalog().is_none()); // Only real private capture can supply it.
+    assert!(InstrumentBouncePlan::prepare(&p, 1, 48_000, 0).is_err());
+    assert!(
+        InstrumentBouncePlan::prepare_occurrence(&p, master_song_occurrence_request(&p)).is_err()
+    );
+    assert_eq!(serde_json::to_vec(&p).unwrap(), bytes);
+    p.plugin_instances[0].parameters.remove(&17);
+    assert!(InstrumentBouncePlan::prepare_master_song(&p, 1, 48_000, 0).is_err());
+}
+
+#[test]
+fn whole_generator_automation_reuses_eight_parameter_endpoint_limit() {
+    use crate::automation::AutomationTarget;
+    let mut p = master_song_project();
+    for id in 100..109 {
+        p.plugin_instances[0].parameters.insert(id, 0.5);
+        p.automation_lanes.push(master_song_lane(
+            u64::from(id),
+            AutomationTarget::PluginParameter {
+                instance: 41,
+                parameter: id,
+            },
+            0.0,
+            1.0,
+        ));
+    }
+    assert!(InstrumentBouncePlan::prepare_master_song(&p, 1, 48_000, 0).is_err());
+    p.automation_lanes.pop();
+    assert_eq!(
+        InstrumentBouncePlan::prepare_master_song(&p, 1, 48_000, 0)
+            .unwrap()
+            .generator_automation_ids()
+            .len(),
+        8
     );
 }
 

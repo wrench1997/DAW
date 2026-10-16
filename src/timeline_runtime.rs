@@ -3106,7 +3106,7 @@ fn transport_activation_spec_is_valid(spec: TimelineTransportActivationSpec) -> 
                 && spec.loop_end_q32 > spec.loop_start_q32))
 }
 
-fn validate_timeline(
+pub(crate) fn validate_timeline(
     revision: u64,
     timeline: &CompiledTimeline,
 ) -> Result<(), TimelineRuntimeValidationError> {

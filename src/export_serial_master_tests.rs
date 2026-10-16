@@ -332,7 +332,7 @@ fn serial_master_plan_rejects_nonmaster_automation_but_allows_empty_or_disabled_
             name: "Active static-slice refusal".into(),
             lane,
         });
-        assert_refused(&project, "only Master Volume/Pan/Mute automation");
+        assert_refused(&project, "only Master controls");
         project.automation_lanes[0].lane.set_enabled(false);
         assert_eq!(
             placements(&StaticSerialMasterPlan::prepare(&project, CHANNEL).unwrap()),
@@ -376,6 +376,40 @@ fn serial_master_plan_accepts_canonical_master_controls_without_rewriting_author
         assert_eq!(project.automation_lanes[0].lane.target(), &target);
         assert_eq!(serde_json::to_vec(&project).unwrap(), before);
     }
+}
+
+#[test]
+fn serial_master_plan_admits_only_source_generator_parameters_with_stored_f32_bases() {
+    let mut project = project();
+    project
+        .plugin_instances
+        .iter_mut()
+        .find(|p| p.id == GENERATOR)
+        .unwrap()
+        .parameters
+        .insert(17, 0.625);
+    let mut lane = AutomationLane::new(AutomationTarget::PluginParameter {
+        instance: GENERATOR,
+        parameter: 17,
+    });
+    lane.replace_points([AutomationPoint::new(0.0, 0.25)]);
+    project.automation_lanes.push(ProjectAutomation {
+        id: 1,
+        name: "Generator gain".into(),
+        lane,
+    });
+    let before = serde_json::to_vec(&project).unwrap();
+    let plan = StaticSerialMasterPlan::prepare(&project, CHANNEL).unwrap();
+    assert_eq!(placements(&plan), expected_placements());
+    assert_eq!(serde_json::to_vec(&project).unwrap(), before);
+    project
+        .plugin_instances
+        .iter_mut()
+        .find(|p| p.id == GENERATOR)
+        .unwrap()
+        .parameters
+        .remove(&17);
+    assert_refused(&project, "only Master controls");
 }
 
 #[test]

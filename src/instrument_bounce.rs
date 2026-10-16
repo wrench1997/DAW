@@ -18,7 +18,7 @@ pub(crate) use occurrence::OccurrenceRenderProvenance;
 pub(crate) mod effect;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     hash::{DefaultHasher, Hash, Hasher},
     sync::{Arc, mpsc::TryRecvError},
     time::{Duration, Instant},
@@ -324,6 +324,63 @@ impl BouncePluginState {
 pub struct BounceStateReceipt {
     pub(crate) epoch: u64,
     pub(crate) state: BouncePluginState,
+    pub(crate) automation_catalog: Option<GeneratorAutomationCatalog>,
+}
+
+/// Actual stopped source metadata, requested only by Whole Generator automation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratorAutomationCatalog {
+    pub(crate) revision: u64,
+    pub(crate) parameters: Vec<crate::plugins::plugin_runtime::PluginParameterDescriptor>,
+}
+
+impl GeneratorAutomationCatalog {
+    #[cfg(feature = "vst3")]
+    pub(crate) fn same_schema(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.parameters.len() == other.parameters.len()
+            && self.parameters.iter().zip(&other.parameters).all(|(a, b)| {
+                a.id == b.id
+                    && a.name == b.name
+                    && a.unit == b.unit
+                    && a.default_normalized.map(f32::to_bits)
+                        == b.default_normalized.map(f32::to_bits)
+                    && a.step_count == b.step_count
+                    && a.automatable == b.automatable
+                    && a.read_only == b.read_only
+                    && a.bypass == b.bypass
+            })
+    }
+    pub(crate) fn validate(&self, ids: &[u32]) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        if self.revision == 0
+            || self.parameters.len()
+                > crate::plugins::plugin_runtime::MAX_PLUGIN_PARAMETER_CATALOG_ITEMS
+            || self.parameters.iter().any(|p| !seen.insert(p.id))
+            || self.parameters.iter().any(|p| {
+                !p.current_normalized.is_finite()
+                    || !(0.0..=1.0).contains(&p.current_normalized)
+                    || p.default_normalized
+                        .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+            })
+        {
+            return Err(
+                "Whole Generator automation requires an unambiguous actual source catalog".into(),
+            );
+        }
+        for id in ids {
+            if !self
+                .parameters
+                .iter()
+                .any(|p| p.id == *id && !p.read_only && p.automatable)
+            {
+                return Err(format!(
+                    "Whole Generator parameter {id} is absent, read-only or not automatable"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Prepared solely from an immutable project view; compilation retains original channel order.
@@ -340,6 +397,8 @@ pub struct InstrumentBouncePlan {
     occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
     master_song: bool,
     serial_master: bool,
+    generator_automation_ids: Vec<u32>,
+    generator_automation_catalog: Option<GeneratorAutomationCatalog>,
 }
 
 impl InstrumentBouncePlan {
@@ -362,8 +421,8 @@ impl InstrumentBouncePlan {
 
     /// Prepare a complete single-generator song for the master export owner.
     /// The original project is compiled and fingerprinted without filtering;
-    /// static channel/mixer controls and admitted master automation remain in
-    /// the timeline for composition after the isolated generator render.
+    /// Generator Q128 automation is consumed before its DSP; static channel/mixer
+    /// controls and Master automation remain for the final composition stage.
     pub fn prepare_master_song(
         project: &Project,
         channel_id: u32,
@@ -447,7 +506,9 @@ impl InstrumentBouncePlan {
             .iter()
             .filter(|lane| lane.lane.is_enabled() && !lane.lane.points().is_empty())
         {
-            if !master_song || !master_song_automation_target(lane.lane.target()) {
+            if !master_song
+                || !whole_song_automation_target(project, channel_id, lane.lane.target())
+            {
                 return Err(format!(
                     "Instrument bounce does not support active automation, including Tempo (lane {}: {})",
                     lane.id, lane.name
@@ -510,6 +571,26 @@ impl InstrumentBouncePlan {
                 serial_master,
             )?;
         }
+        let generator_automation_ids: Vec<u32> = if master_song {
+            timeline
+                .driven_automation_targets()
+                .iter()
+                .filter_map(|target| match *target {
+                    CompiledAutomationTarget::PluginParameter {
+                        instance_id: source,
+                        parameter_id,
+                    } if source == instance_id => Some(parameter_id),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !generator_automation_ids.is_empty() {
+            // Reuse the real endpoint MIDI+parameter/callback/target budgets; no
+            // runtime installation or new epoch is performed by this pure check.
+            crate::timeline_runtime::validate_timeline(1, &timeline).map_err(|e| e.to_string())?;
+        }
         if let Some(request) = &occurrence {
             occurrence::check_compiled_request(request, &timeline, instance_id)?;
         }
@@ -553,6 +634,8 @@ impl InstrumentBouncePlan {
             occurrence,
             master_song,
             serial_master,
+            generator_automation_ids,
+            generator_automation_catalog: None,
         })
     }
 
@@ -575,6 +658,12 @@ impl InstrumentBouncePlan {
     }
     pub(crate) fn is_serial_master(&self) -> bool {
         self.serial_master
+    }
+    pub(crate) fn generator_automation_ids(&self) -> &[u32] {
+        &self.generator_automation_ids
+    }
+    pub(crate) fn generator_automation_catalog(&self) -> Option<&GeneratorAutomationCatalog> {
+        self.generator_automation_catalog.as_ref()
     }
     pub fn instance_id(&self) -> u64 {
         self.instance_id
@@ -611,6 +700,32 @@ pub(crate) fn master_song_automation_target(target: &AutomationTarget) -> bool {
                 track: crate::mixer_graph::MASTER_MIXER_TRACK_ID
             }
     )
+}
+
+pub(crate) fn whole_song_automation_target(
+    project: &Project,
+    channel_id: u32,
+    target: &AutomationTarget,
+) -> bool {
+    if master_song_automation_target(target) {
+        return true;
+    }
+    let AutomationTarget::PluginParameter {
+        instance,
+        parameter,
+    } = target
+    else {
+        return false;
+    };
+    project.channels.iter().any(|channel| {
+        channel.id == channel_id && channel.instrument_plugin_instance_id == Some(*instance)
+    }) && project.plugin_instances.iter().any(|plugin| {
+        plugin.id == *instance
+            && plugin
+                .parameters
+                .get(parameter)
+                .is_some_and(|value| value.is_finite() && (0.0..=1.0).contains(value))
+    })
 }
 
 fn master_song_compiled_automation_target(target: CompiledAutomationTarget) -> bool {
@@ -682,6 +797,20 @@ fn validate_master_song_timeline(
         return Err("Master song bounce does not support Timeline audio sources".into());
     }
     for event in timeline.events() {
+        if let TimelineEventKind::AutomationRamp(ramp) = event.kind
+            && matches!(
+                ramp.target,
+                CompiledAutomationTarget::PluginParameter { .. }
+            )
+            && (!ramp.start_value.is_finite()
+                || !ramp.end_value.is_finite()
+                || !(0.0..=1.0).contains(&ramp.start_value)
+                || !(0.0..=1.0).contains(&ramp.end_value))
+        {
+            return Err(
+                "Whole Generator automation contains a non-normalized compiled ramp".into(),
+            );
+        }
         match event.kind {
             TimelineEventKind::NoteOn {
                 channel_id: source_channel,
@@ -703,7 +832,11 @@ fn validate_master_song_timeline(
                 ..
             })
             | TimelineEventKind::AutomationEnd { target, .. }
-                if !master_song_compiled_automation_target(target) =>
+                if !master_song_compiled_automation_target(target)
+                    && !matches!(target, CompiledAutomationTarget::PluginParameter { instance_id: id, parameter_id }
+                        if id == instance_id && project.plugin_instances.iter().any(|p|
+                            p.id == id && p.parameters.get(&parameter_id).is_some_and(|v|
+                                v.is_finite() && (0.0..=1.0).contains(v)))) =>
             {
                 return Err("Master song bounce contains unsupported compiled automation".into());
             }
@@ -814,10 +947,11 @@ impl InstrumentBounceCapture {
         {
             return Err("Instrument bounce source differs from the prepared selection".into());
         }
-        let receiver = control.request_instrument_bounce_state(
+        let receiver = control.request_whole_instrument_bounce_state(
             identity.instance_id,
             identity.epoch,
             plan.parameter_ids.clone(),
+            plan.generator_automation_ids.clone(),
         )?;
         Ok(Self {
             identity,
@@ -938,9 +1072,21 @@ impl InstrumentBounceCapture {
             .state
             .validate(&plan.parameter_ids, plan.sample_rate)
             .map_err(CapturePollError::Invalid)?;
+        if !plan.generator_automation_ids.is_empty() {
+            let catalog = receipt.automation_catalog.as_ref().ok_or_else(|| {
+                CapturePollError::Invalid(
+                    "Whole Generator automation source catalog was not captured".into(),
+                )
+            })?;
+            catalog
+                .validate(&plan.generator_automation_ids)
+                .map_err(CapturePollError::Invalid)?;
+        }
+        let mut plan = self.plan.take().expect("checked above");
+        plan.generator_automation_catalog = receipt.automation_catalog;
         Ok(Some(CapturedInstrumentBounce {
             identity: self.identity,
-            plan: self.plan.take().expect("checked above"),
+            plan,
             state: receipt.state,
             receipt_token: Arc::new(()),
         }))

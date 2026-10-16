@@ -206,6 +206,34 @@ fn sdk_factory2_preserves_default_fx_and_separately_advertises_lookahead_instrum
             assert_eq!(processor.getLatencySamples(), 32);
             assert_eq!(processor.getTailSamples(), tail);
             assert!(controller.createView(ptr::null()).is_null());
+            // Query the actual factory-created SDK controller, not a host-side
+            // fabricated catalog. Only the feature bundle's Instrument Gain
+            // advertises automation; the default bundle and Effect stay static.
+            let mut gain: ParameterInfo = std::mem::zeroed();
+            assert_eq!(controller.getParameterInfo(0, &mut gain), kResultOk);
+            assert_eq!(gain.id, 0);
+            assert_eq!(gain.defaultNormalizedValue, 0.5);
+            let expected_gain_flags = if cfg!(feature = "instrument-first") && cid == INSTRUMENT_CID
+            {
+                ParameterInfo_::ParameterFlags_::kCanAutomate as i32
+            } else {
+                0
+            };
+            assert_eq!(gain.flags, expected_gain_flags);
+            assert_eq!(controller.getParameterCount(), 1 + PROBES.len() as i32);
+            for index in 1..controller.getParameterCount() {
+                let mut probe: ParameterInfo = std::mem::zeroed();
+                assert_eq!(controller.getParameterInfo(index, &mut probe), kResultOk);
+                assert_eq!(probe.id, PROBES[index as usize - 1].0);
+                assert_eq!(
+                    probe.flags,
+                    ParameterInfo_::ParameterFlags_::kIsReadOnly as i32
+                );
+                assert_eq!(
+                    probe.flags & ParameterInfo_::ParameterFlags_::kCanAutomate as i32,
+                    0
+                );
+            }
         }
         let effect = ComWrapper::new(Effect::default())
             .to_com_ptr::<IComponent>()

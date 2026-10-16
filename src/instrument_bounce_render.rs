@@ -33,6 +33,9 @@ use std::{
 #[path = "whole_serial_render.rs"]
 pub(crate) mod serial;
 
+#[path = "generator_q128_automation.rs"]
+mod generator_controls;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureKind {
     Cancelled,
@@ -649,6 +652,11 @@ pub(crate) trait RenderBackend: 'static {
         control: &RenderControl,
     ) -> Result<BouncePluginMetadata, BackendFailure>;
     fn metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure>;
+    fn set_automated_parameters(&mut self, _values: &[(u32, f32)]) -> Result<(), BackendFailure> {
+        Err(BackendFailure::from(
+            "This backend does not support Whole Generator Q128 automation",
+        ))
+    }
     fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), BackendFailure>;
     fn process(
         &mut self,
@@ -1117,6 +1125,7 @@ fn render_audio_interval<B: RenderBackend>(
             Ok(())
         },
     )?;
+    let mut generator_controls = generator_controls::GeneratorControls::new(capture)?;
     let mut next = 0;
     let keep_end = keep_start
         .checked_add(retained_frames as u64)
@@ -1132,6 +1141,20 @@ fn render_audio_interval<B: RenderBackend>(
                 Ok(())
             },
         )?;
+        if let Some(controls) = &mut generator_controls {
+            controls.apply(capture.plan().timeline(), start, backend, control)?;
+            // Setters may change buses/latency/tail or begin async work. Preserve
+            // the same metadata/readiness fence before any MIDI/positive DSP.
+            control.call_checked(
+                || backend.metadata(),
+                |actual| {
+                    if actual != &prepared.metadata {
+                        return Err(invalid("Instrument metadata changed after automation"));
+                    }
+                    Ok(())
+                },
+            )?;
+        }
         while let Some(event) = prepared
             .midi
             .get(next)

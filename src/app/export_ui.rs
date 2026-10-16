@@ -292,8 +292,8 @@ fn settings_body(
     if draft.whole_song {
         ui.label(whole_fixed_window_review_text(draft.options));
         ui.label("Master Volume/Pan/Mute automation is rendered. The selected fixed tail holds the final master controls and starts no new notes. This export does not measure acoustic silence.");
-        ui.label("Offline limits: one VST3 Instrument at the current sample rate, with optional fully wet VST3 Inserts in one static, ordered post-fader chain to Master. Only Master Volume/Pan/Mute automation is supported.");
-        ui.label("Unavailable: branches, sends, sidechains, active partial-wet Inserts, off-path Inserts, other music/audio sources, and Tempo, non-Master or plug-in parameter automation. Use Realtime Master Capture for those projects.");
+        ui.label("Offline limits: one VST3 Instrument at the current sample rate, with optional fully wet VST3 Inserts in one static, ordered post-fader chain to Master. Master Volume/Pan/Mute automation is sample-exact; the source Generator's automatable parameters use Q128 block-start values and hold their last sent values through the fixed tail.");
+        ui.label("Unavailable: branches, sends, sidechains, active partial-wet Inserts, off-path Inserts, other music/audio sources, Tempo, Channel/non-Master mixer controls, and other plug-in/slot parameter automation. Use Realtime Master Capture for those projects. Generator automation is not sample-accurate within Q128.");
         if draft.step == ExportStep::Review {
             let response = ui.checkbox(
                 &mut draft.fixed_tail_confirmed,

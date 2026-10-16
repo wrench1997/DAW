@@ -25,6 +25,9 @@ use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 
 #[cfg(test)]
 use crate::genuine_app_observer as genuine_observer;
+#[cfg(test)]
+#[path = "plugin_runtime_panic_boundary.rs"]
+mod panic_boundary;
 #[cfg(all(test, feature = "vst3"))]
 use crate::genuine_app_observer::{Boundary, InstanceObserver, InstancePhase, Operation};
 
@@ -484,6 +487,25 @@ pub trait PluginBackend: 'static {
         fence.checkpoint()?;
         Err(BounceCaptureError::Rejected(
             "This backend does not support instrument bounce capture".into(),
+        ))
+    }
+
+    /// Whole-only source catalog attestation. Old Instrument callers never require it.
+    fn capture_automated_instrument_bounce_state(
+        &mut self,
+        _parameter_ids: &[u32],
+        _automation_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<
+        (
+            BouncePluginState,
+            crate::instrument_bounce::GeneratorAutomationCatalog,
+        ),
+        BounceCaptureError,
+    > {
+        fence.checkpoint()?;
+        Err(BounceCaptureError::Rejected(
+            "This backend does not support Whole Generator automation capture".into(),
         ))
     }
     /// Separate role-specific private source path. Legacy/Instrument backends keep their contract.
@@ -2538,6 +2560,7 @@ enum AdminCommand {
     CaptureInstrumentBounce {
         expected_epoch: u64,
         parameter_ids: Vec<u32>,
+        automation_ids: Vec<u32>,
         parameter_admission: Arc<AtomicU32>,
         lease: BounceCaptureLease,
         reply: SyncSender<Result<BounceStateReceipt, BounceCaptureError>>,
@@ -2996,11 +3019,60 @@ impl PluginChainControl {
         parameter_ids: Vec<u32>,
         deadline: Instant,
     ) -> Result<BounceStateReceiver, String> {
+        self.request_instrument_bounce_state_inner(
+            instance_id,
+            expected_epoch,
+            parameter_ids,
+            Vec::new(),
+            deadline,
+        )
+    }
+
+    pub(crate) fn request_whole_instrument_bounce_state(
+        &self,
+        instance_id: u64,
+        expected_epoch: u64,
+        parameter_ids: Vec<u32>,
+        automation_ids: Vec<u32>,
+    ) -> Result<BounceStateReceiver, String> {
+        if automation_ids.is_empty() {
+            return self.request_instrument_bounce_state(
+                instance_id,
+                expected_epoch,
+                parameter_ids,
+            );
+        }
+        let deadline = Instant::now()
+            .checked_add(crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT)
+            .ok_or("Instrument bounce capture deadline overflow")?;
+        self.request_instrument_bounce_state_inner(
+            instance_id,
+            expected_epoch,
+            parameter_ids,
+            automation_ids,
+            deadline,
+        )
+    }
+
+    fn request_instrument_bounce_state_inner(
+        &self,
+        instance_id: u64,
+        expected_epoch: u64,
+        parameter_ids: Vec<u32>,
+        automation_ids: Vec<u32>,
+        deadline: Instant,
+    ) -> Result<BounceStateReceiver, String> {
         if expected_epoch == 0
             || self.manifest.slot_count != 1
             || self.manifest.instance_ids[0] != Some(instance_id)
             || parameter_ids.len() > MAX_PLUGIN_PARAMETER_CATALOG_ITEMS
             || parameter_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || automation_ids.len()
+                > crate::timeline::TIMELINE_ENDPOINT_MAX_DRIVEN_PLUGIN_PARAMETERS
+            || automation_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || automation_ids
+                .iter()
+                .any(|id| parameter_ids.binary_search(id).is_err())
             || self.parameter_edit_admission.load(Ordering::Acquire) != 0
         {
             return Err("Instrument bounce requires one exact identified generator, a nonzero epoch and drained, unique generic parameter keys".into());
@@ -3040,6 +3112,7 @@ impl PluginChainControl {
         if !self.try_admin(AdminCommand::CaptureInstrumentBounce {
             expected_epoch,
             parameter_ids,
+            automation_ids,
             parameter_admission: Arc::clone(&self.parameter_edit_admission),
             lease,
             reply,
@@ -4490,6 +4563,7 @@ fn run_worker(
                 AdminCommand::CaptureInstrumentBounce {
                     expected_epoch,
                     parameter_ids,
+                    automation_ids,
                     parameter_admission,
                     lease,
                     reply,
@@ -4507,6 +4581,7 @@ fn run_worker(
                         &requested_epoch,
                         input.is_empty(),
                         &parameter_ids,
+                        &automation_ids,
                         &parameter_admission,
                         &mut slots,
                         &mut events,
@@ -4743,6 +4818,10 @@ fn run_worker(
                     .stage(PluginWorkerStage::OutputPush, None);
                 match output.push(block) {
                     Ok(()) => {
+                        #[cfg(test)]
+                        if let Some(epoch) = first_sequence_publication {
+                            panic_boundary::process_output_published(epoch, 1);
+                        }
                         metrics.diagnostics.count_output_frames(frames);
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                     }
@@ -4818,11 +4897,24 @@ fn push_parameter_edit_receipt(
     receipts: &mut Producer<ParameterEditReceipt>,
     receipt: ParameterEditReceipt,
 ) {
+    #[cfg(test)]
+    let panicked_edit = match &receipt {
+        ParameterEditReceipt::Failed {
+            edit_id,
+            reason: ParameterEditFailureReason::BackendPanicked,
+            ..
+        } => Some(edit_id.get()),
+        _ => None,
+    };
     // Receipt occupancy plus admitted edits in all earlier pipeline stages is at most sixteen.
     // Since admission is released only after a receipt pop, an equal-capacity ring always owns a
     // slot for the next terminal edit.
     if receipts.push(receipt).is_err() {
         panic!("parameter edit receipt ring admission invariant violated");
+    }
+    #[cfg(test)]
+    if let Some(edit_id) = panicked_edit {
+        panic_boundary::parameter_receipt_published(edit_id);
     }
 }
 
@@ -4865,10 +4957,14 @@ fn fail_parameter_edits_from_worker_block(
 fn catch_backend<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     match panic::catch_unwind(AssertUnwindSafe(operation)) {
         Ok(result) => result,
-        Err(payload) => Err(format!(
-            "plug-in panicked: {}",
-            panic_payload_message(payload.as_ref())
-        )),
+        Err(payload) => {
+            #[cfg(test)]
+            panic_boundary::catch_returned();
+            Err(format!(
+                "plug-in panicked: {}",
+                panic_payload_message(payload.as_ref())
+            ))
+        }
     }
 }
 
@@ -5253,6 +5349,7 @@ fn capture_instrument_bounce_on_worker(
     requested_epoch: &AtomicU64,
     input_empty: bool,
     parameter_ids: &[u32],
+    automation_ids: &[u32],
     parameter_admission: &AtomicU32,
     slots: &mut [WorkerSlot],
     events: &mut Producer<RuntimeEvent>,
@@ -5321,7 +5418,15 @@ fn capture_instrument_bounce_on_worker(
         .ok_or_else(|| reject("Instrument bounce source backend is unavailable"))?;
     fence.checkpoint()?;
     let captured = panic::catch_unwind(AssertUnwindSafe(|| {
-        backend.capture_instrument_bounce_state(parameter_ids, fence)
+        if automation_ids.is_empty() {
+            backend
+                .capture_instrument_bounce_state(parameter_ids, fence)
+                .map(|state| (state, None))
+        } else {
+            backend
+                .capture_automated_instrument_bounce_state(parameter_ids, automation_ids, fence)
+                .map(|(state, catalog)| (state, Some(catalog)))
+        }
     }))
     .unwrap_or_else(|payload| {
         Err(BounceCaptureError::BackendFailed(format!(
@@ -5337,7 +5442,24 @@ fn capture_instrument_bounce_on_worker(
         // identity before replying, not at the next periodic poll or later admin command.
         update_latency_and_tail(slots, events, metrics);
     }
-    let state = captured?;
+    let (state, automation_catalog) = captured?;
+    if !automation_ids.is_empty() {
+        automation_catalog
+            .as_ref()
+            .ok_or_else(|| reject("Whole Generator automation source catalog is absent"))?
+            .validate(automation_ids)
+            .map_err(BounceCaptureError::Rejected)?;
+        if automation_ids.iter().any(|id| {
+            state
+                .parameter_bases
+                .get(id)
+                .is_none_or(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        }) {
+            return Err(reject(
+                "Whole Generator automation requires every captured f32 base",
+            ));
+        }
+    }
     fence.checkpoint()?;
     if requested_epoch.load(Ordering::Acquire) != expected_epoch
         || !editor_closed()
@@ -5350,6 +5472,7 @@ fn capture_instrument_bounce_on_worker(
     Ok(BounceStateReceipt {
         epoch: expected_epoch,
         state,
+        automation_catalog,
     })
 }
 
@@ -6109,10 +6232,14 @@ fn catch_parameter_backend<T>(
     match panic::catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(message)) => Err(ParameterBackendError::Rejected(message)),
-        Err(payload) => Err(ParameterBackendError::Panicked(format!(
-            "plug-in panicked: {}",
-            panic_payload_message(payload.as_ref())
-        ))),
+        Err(payload) => {
+            #[cfg(test)]
+            panic_boundary::catch_returned();
+            Err(ParameterBackendError::Panicked(format!(
+                "plug-in panicked: {}",
+                panic_payload_message(payload.as_ref())
+            )))
+        }
     }
 }
 
@@ -7891,6 +8018,21 @@ impl PluginBackend for Vst3Backend {
         self.capture_bounce_state(parameter_ids, fence)
     }
 
+    fn capture_automated_instrument_bounce_state(
+        &mut self,
+        parameter_ids: &[u32],
+        automation_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<
+        (
+            BouncePluginState,
+            crate::instrument_bounce::GeneratorAutomationCatalog,
+        ),
+        BounceCaptureError,
+    > {
+        self.capture_automated_bounce_state(parameter_ids, automation_ids, fence)
+    }
+
     fn capture_effect_bounce_state(
         &mut self,
         parameter_ids: &[u32],
@@ -8163,6 +8305,7 @@ impl Drop for Vst3Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("plugin_runtime_panic_boundary_tests.rs");
 
     #[test]
     fn admin_work_lease_rejects_overflow_and_releases_each_success_once() {
@@ -8749,6 +8892,7 @@ mod tests {
         parameter_catalog_revision: u64,
         parameter_snapshot_getters: Option<Arc<AtomicU64>>,
         transports: Option<Arc<std::sync::Mutex<Vec<PluginTransport>>>>,
+        panic_boundary: Option<Arc<panic_boundary::Trace>>,
     }
 
     impl MockBackend {
@@ -8774,6 +8918,7 @@ mod tests {
                 parameter_catalog_revision: 1,
                 parameter_snapshot_getters: None,
                 transports: None,
+                panic_boundary: None,
             }
         }
     }
@@ -8831,7 +8976,13 @@ mod tests {
                         right[frame] = next_right;
                     }
                 }
-                MockProcess::Panic => panic!("mock exploded"),
+                MockProcess::Panic => {
+                    let _unwind = self
+                        .panic_boundary
+                        .as_ref()
+                        .map(panic_boundary::panic_requested);
+                    panic!("mock exploded");
+                }
                 MockProcess::NonFinite => left[0] = f32::NAN,
                 MockProcess::Slow(duration) => {
                     if let Some(entered) = &self.entered {
@@ -8868,6 +9019,10 @@ mod tests {
                 return Err("mock parameter does not exist".into());
             }
             if id == u32::MAX - 1 {
+                let _unwind = self
+                    .panic_boundary
+                    .as_ref()
+                    .map(panic_boundary::panic_requested);
                 panic!("mock parameter setter exploded");
             }
             self.parameter = normalized;
@@ -9254,6 +9409,14 @@ mod tests {
     }
 
     fn receive(audio: &mut AudioThreadEndpoint, expected_frames: usize) -> ([f32; 64], [f32; 64]) {
+        receive_with_timeout_context(audio, expected_frames, String::new)
+    }
+
+    fn receive_with_timeout_context(
+        audio: &mut AudioThreadEndpoint,
+        expected_frames: usize,
+        timeout_context: impl Fn() -> String,
+    ) -> ([f32; 64], [f32; 64]) {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut left = [0.0; 64];
         let mut right = [0.0; 64];
@@ -9266,7 +9429,10 @@ mod tests {
                 ReceiveStatus::Empty if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(1));
                 }
-                status => panic!("timed out waiting for worker output: {status:?}"),
+                status => panic!(
+                    "timed out waiting for worker output: {status:?}; {}",
+                    timeout_context()
+                ),
             }
         }
     }
@@ -9299,6 +9465,13 @@ mod tests {
     }
 
     fn wait_for_parameter_edit_receipt(control: &mut PluginChainControl) -> ParameterEditReceipt {
+        wait_for_parameter_edit_receipt_with_timeout_context(control, String::new)
+    }
+
+    fn wait_for_parameter_edit_receipt_with_timeout_context(
+        control: &mut PluginChainControl,
+        timeout_context: impl Fn() -> String,
+    ) -> ParameterEditReceipt {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Some(receipt) = control.try_next_parameter_edit_receipt() {
@@ -9306,7 +9479,8 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for parameter edit receipt"
+                "timed out waiting for parameter edit receipt; {}",
+                timeout_context()
             );
             thread::sleep(Duration::from_millis(1));
         }
@@ -10196,11 +10370,17 @@ mod tests {
     #[test]
     fn panic_and_nonfinite_output_fault_the_slot_and_pass_dry_audio() {
         for process in [MockProcess::Panic, MockProcess::NonFinite] {
+            let panic_trace = panic_boundary::Trace::new(panic_boundary::Terminal::ProcessOutput {
+                epoch: INITIAL_TRANSPORT_EPOCH,
+                sequence: 1,
+            });
+            let worker_panic_trace = Arc::clone(&panic_trace);
             let mut chain = PluginChain::spawn_with_backend_factory(
                 move || {
                     let mut backend = MockBackend::new("broken", process);
                     backend.latency = 9;
                     backend.tail = 7;
+                    backend.panic_boundary = Some(worker_panic_trace);
                     vec![BackendSlot::new(Box::new(backend))]
                 },
                 config(),
@@ -10212,7 +10392,13 @@ mod tests {
             assert_eq!(initial_latency.total_plugin_latency_samples, 9);
             let input = [0.25; 8];
             chain.audio.try_submit(&input, &input);
-            let (left, right) = receive(&mut chain.audio, input.len());
+            let (left, right) = receive_with_timeout_context(&mut chain.audio, input.len(), || {
+                panic_trace.describe(
+                    &chain.control.metrics,
+                    &chain.guard,
+                    chain.control.outstanding_parameter_edits(),
+                )
+            });
             assert_eq!(&left[..input.len()], &input);
             assert_eq!(&right[..input.len()], &input);
             wait_until(|| {
@@ -10790,6 +10976,9 @@ mod tests {
 
     #[test]
     fn reliable_parameter_edit_worker_mismatch_reject_and_panic_are_terminal() {
+        let panic_trace =
+            panic_boundary::Trace::new(panic_boundary::Terminal::ParameterReceipt(303));
+        let worker_panic_trace = Arc::clone(&panic_trace);
         let entered = Arc::new(AtomicBool::new(false));
         let entered_worker = Arc::clone(&entered);
         let mut chain = PluginChain::spawn_with_backend_factory(
@@ -10799,6 +10988,7 @@ mod tests {
                     MockProcess::Slow(Duration::from_millis(50)),
                 );
                 backend.entered = Some(entered_worker);
+                backend.panic_boundary = Some(worker_panic_trace);
                 vec![BackendSlot::new(Box::new(backend))]
             },
             config(),
@@ -10860,7 +11050,13 @@ mod tests {
             SubmitStatus::Submitted { .. }
         ));
         assert!(matches!(
-            wait_for_parameter_edit_receipt(&mut chain.control),
+            wait_for_parameter_edit_receipt_with_timeout_context(&mut chain.control, || {
+                panic_trace.describe(
+                    &chain.audio.metrics,
+                    &chain.guard,
+                    chain.audio.parameter_edit_admission.load(Ordering::Acquire),
+                )
+            }),
             ParameterEditReceipt::Failed {
                 edit_id,
                 reason: ParameterEditFailureReason::BackendPanicked,

@@ -442,6 +442,7 @@ fn guard_result(expected: u64, active: u64, requested: u64, empty: bool, admissi
         &AtomicU64::new(requested),
         empty,
         &[],
+        &[],
         &AtomicU32::new(admission),
         &mut slots,
         &mut events,

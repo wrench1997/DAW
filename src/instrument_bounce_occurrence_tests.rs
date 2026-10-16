@@ -111,6 +111,7 @@ fn capture_actual(
     let AdminCommand::CaptureInstrumentBounce {
         expected_epoch,
         parameter_ids,
+        automation_ids,
         parameter_admission,
         lease,
         reply,
@@ -118,6 +119,10 @@ fn capture_actual(
     else {
         panic!("not the dedicated capture request")
     };
+    assert!(
+        automation_ids.is_empty(),
+        "Occurrence retains its original capture contract"
+    );
     let before = control.metrics.native_editors.lock().unwrap()[0].clone();
     let mut slots = vec![slot(Ok(state), calls, None)];
     let (mut events, mut rx) = RingBuffer::new(4);
@@ -128,6 +133,7 @@ fn capture_actual(
         &AtomicU64::new(identity.epoch),
         true,
         &parameter_ids,
+        &automation_ids,
         &parameter_admission,
         &mut slots,
         &mut events,
@@ -650,6 +656,7 @@ fn occurrence_second_capture_cancel_timeout_and_fault_are_drained_without_insert
         let AdminCommand::CaptureInstrumentBounce {
             expected_epoch,
             parameter_ids,
+            automation_ids,
             parameter_admission,
             lease,
             reply,
@@ -692,6 +699,7 @@ fn occurrence_second_capture_cancel_timeout_and_fault_are_drained_without_insert
             &AtomicU64::new(stamp.epoch),
             true,
             &parameter_ids,
+            &automation_ids,
             &parameter_admission,
             &mut slots,
             &mut events,
