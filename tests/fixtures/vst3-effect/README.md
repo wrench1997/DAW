@@ -131,7 +131,7 @@ Read-only probes never send dirty callbacks or modify persisted state:
 
 This is focused backend evidence. The static serial Whole consumer separately
 passed its real-Generator/two-Effect PCM/latency oracle and final local code gates.
-Its new exact-candidate cloud validation remains pending. General FX graphs,
+Its Windows full-suite cloud run failed as recorded below. General FX graphs,
 automation, arbitrary tails and real NOIRE acceptance remain separate from these
 fixture results.
 
@@ -144,8 +144,19 @@ checked1280 samples/35 probes, and the new Instrument case checked768 samples wi
 real32-sample FIFO, state40, finite tail32 and natural helper exit/reap. All owned
 native phases ended0 without resource guards. Evidence is in
 `target/backend-reliability-20261014/serial-lookahead-instrument-fixture-01/`.
-The new second-class fixture/CI delta has not run in Linux/cloud. It is separate
-from the committed capture/CAS candidate and the later Whole consumer validation.
+At `8d8e94d1`, Linux quality38829430252 passed all6 fixture tests and both
+explicit real helper targets, including the Instrument's768 samples/32-frame FIFO.
+Windows App tests failed on a new Whole cancel/join-observation assertion before
+its SDK, Clippy/build/no-default or PrintWindow steps. Preview38829430476 failed
+on the related App-drop observation, then retained-fixture admission failures;
+release/ZIP/helper validation did not execute. The exact candidate is not cloud
+accepted. Full logs are under `target/backend-reliability-20261014/source121-*`;
+the source-only repair now uses the same original controls' existing real
+guard-return Join witnesses instead of installing a full global collector for
+these local lifecycle checks. Production, collector limits and failure rules are
+unchanged. A new scoped foreign-collector failure regression is included. This
+test-only repair passed static checks but has not run locally; the next exact
+cloud run must compile and execute it.
 At `b73b57a`, quality38824285643 actually passed: both platforms ran29 Effect
 cases and the real non-f32 helper SDK target. Windows additionally ran the App
 private-source exact target with Gain0.12345678912345678, sourceDSP0, original

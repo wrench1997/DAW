@@ -298,8 +298,8 @@ stereo output, 16-channel main events and a physical 32-sample FIFO; default Eff
 class/DSP stays unchanged. Local fixture 6 unit tests, strict fixture Clippy, release,
 matching helper and 2 real host targets passed. Both host targets naturally reaped;
 the Instrument target checked 768 samples/state40/latency32/tail32. These asset checks
-are distinct from the Whole SDK oracle. New fixture/Whole Linux cloud acceptance
-is unrun. The same 10-minute no-GUI quality step now source-wires the Windows exact
+are distinct from the Whole SDK oracle. Linux fixture/host execution at `8d8e94d` is recorded
+below; Windows App Whole SDK was not reached. The same 10-minute no-GUI quality step source-wires the Windows exact
 Whole SDK target and both-platform Instrument host target; 6 CI contracts passed.
 No test DLL enters the release payload and no installed NI/plugin/device is used.
 
@@ -319,12 +319,67 @@ not rerun. All held handles reached actual terminal/reap, guard=false. SDK02 pea
 at 4.409GB private/26.380GB physical used; Root's fresh heavy-process check was empty
 at 2026-10-16T00:22:36Z and resources were actually handed back to the peer.
 
-This integration candidate's new cloud acceptance remains **UNRUN**; the published
-b73 quality/preview passes above do not include it. Records:
-`target/backend-reliability-20261014/whole-serial-effects-source-candidate-01/`
-(source-ready/review, actual App/Whole SDK logs, `cpu-handback-02.json` and final
-`cpu-handback-03.json`), plus `serial-lookahead-instrument-fixture-01/HANDOFF.json`
-under the same target directory.
+Published candidate `8d8e94d1abb253e324fb92ac067987910b039a6f` has **FAILED** cloud
+acceptance. [Quality38829430252](https://github.com/wrench1997/DAW/actions/runs/38829430252)
+completed failure, updated 2026-10-16T00:40:35Z. Windows job 116744506979 reported
+2462 App tests passed/1 failed/16 ignored in 450.01s, not an all-target aggregate. Its sole
+failure was `actual_whole_serial_healthy_cancel_drains_effect_ack_without_destroying_any_source`
+at `src/app/clip_render_job_tests.rs:726:17`: `Actual join observation was incomplete`.
+Subsequent Windows Clippy, builds, no-default, real SDK and explicit App source/Whole
+SDK targets, harness/native checks and PrintWindow were not reached. PrintWindow
+was neither an environment SKIP nor PASS; ordinary-suite SDK ignores are not executions.
+
+Linux job 116744507455 completed SUCCESS: async 15, Effect 29, Unix isolation 1, fixture 6,
+real Effect host 1 and lookahead Instrument host 1 passed. The latter actually checked
+768 stereo samples, physical 32-sample FIFO, state40, latency32/tail32 and natural
+cleanup. This accepts the Linux fixture/host slice, not the Windows App Whole oracle.
+
+[Preview38829430476](https://github.com/wrench1997/DAW/actions/runs/38829430476),
+job 116744507983, completed failure, updated 2026-10-16T00:43:17Z. Python 371 = 359 passed/
+12 conditional skips in 23.113s and the existing Effect 29 passed. App then reported
+2445 passed/18 failed/16 ignored in 498.29s. The first new AppDrop case,
+`actual_whole_serial_app_drop_keeps_all_source_guards_until_effect_ack_and_actual_join`,
+failed at the same hook with incomplete join observation. The following 17 failures
+reported `prior App fixture cleanup is unproven`; retained sticky ownership refused
+new fixtures. Release/archive, ZIP and extracted-helper checks did not execute.
+
+Source review established a test-fixture defect: new Serial fixtures used the
+process-global `ACTIVE` collector, which has no source-owner filter, four lifetime
+worker-identity slots and sticky failure from foreign false hooks. Both failed raw
+logs omitted the actual `snapshot.failure` literal, so their precise first failure
+enum cannot be reconstructed. Root adopted a frozen source-only repair in
+`src/app/clip_render_job_tests.rs` and `src/app/whole_serial_app_tests.rs`; production,
+the global observer/limits/sticky semantics, vendor fixtures and CI are unchanged.
+
+The Serial fixture now retains all three original `PluginChainControl` Arcs and
+unique IDs and reads the existing `genuine_retained_join_observation`. It accepts
+`HealthyJoinReturned` or `HealthyJoinObserverCallReturned` only: those witnesses
+are written after the original `JoinHandle.join()` actually returns (and, for the
+latter, after its observer returns). Panic, detach and shutdown timeout fail;
+NotPolled/unfinished/finished alone are not completed joins. Healthy Cancel also
+asserts NotPolled before and after the original ACK/drain. AppDrop still requires
+all three original actual joins; original budgets, sticky cleanup refusal and
+emergency retained owners are preserved.
+
+The new eighth ordinary App case uses a scoped foreign thread that first owns
+its own temporary `ObservationRun`, then emits a false hook and asserts that
+run's failure. It finishes that run and actually joins before local source checks;
+it never injects into an unknown `ACTIVE`. The case then checks the original
+three controls remain unpolled while held, drops App, releases the source gate
+and waits for three healthy actual joins with no publication. Existing global
+collector failures are neither cleared nor ignored.
+
+This repair has only actual rustfmt/diffcheck exit0. All local Cargo/native checks
+for the repair are **UNRUN**; the next exact cloud candidate must execute the normal
+full suite under default parallel scheduling, strict Clippy and no-default checks.
+Earlier local 31/150, SDK02/Clippy02/no-default02/build and b73 quality/preview remain
+valid for their original inputs, not acceptance of the failed SHA or this repair.
+Records under `target/backend-reliability-20261014/`: `source121-quality-acceptance.md`,
+`source121-preview-actual-terminal-01.json` and full raw logs; the frozen repair is
+`whole-serial-effects-source-candidate-01/cloud8d8e94d-repair-01/repair.json`.
+Earlier local evidence remains in `whole-serial-effects-source-candidate-01/`
+(source-ready/review, App/Whole SDK logs, `cpu-handback-02.json`/`cpu-handback-03.json`)
+and `serial-lookahead-instrument-fixture-01/HANDOFF.json`.
 General routing/FX automation/PDC, complete natural tails and real NOIRE cold
 restore/export/listening remain required. The user is still testing03; this work
 has not operated the main GUI, soundcard or NI and has not replaced that copy.

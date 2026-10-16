@@ -75,7 +75,10 @@ struct RetainedSerialApp {
 }
 impl SerialApp {
     fn new() -> Self {
-        let mut fixture = Fixture::new_whole_drop_observer_for_test();
+        // These source-only lifecycle checks retain the exact controls below.
+        // They do not install the process-global full genuine-App collector:
+        // unrelated parallel worker/hook traffic belongs to another test.
+        let mut fixture = Fixture::new();
         settle_initial_source(&mut fixture);
         let channel_id = fixture.app().project.channels[0].id;
         let serial = fixture.app().running_generator_chains[&channel_id]
@@ -173,6 +176,7 @@ impl SerialApp {
         app.undo_stack.clear();
         app.redo_stack.clear();
         app.dirty = false;
+        fixture.retain_whole_exact_join_sources_for_test();
         Self {
             fixture: OwnedSerialFixture(Some(fixture)),
             effects,
@@ -508,6 +512,8 @@ fn actual_whole_serial_healthy_cancel_drains_effect_ack_without_destroying_any_s
         this.tick();
     }
     assert!(this.fixture.app().whole_song_export_fence_active());
+    this.fixture
+        .assert_whole_exact_source_guards_unpolled_for_test();
     assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
     this.effects[1].release_all();
     this.until(|this| !this.fixture.app().whole_song_export_fence_active());
@@ -534,9 +540,57 @@ fn actual_whole_serial_healthy_cancel_drains_effect_ack_without_destroying_any_s
             .all(|c| !c.control.stats().stopped)
     );
     assert_eq!(this.fixture.source_handle().reset_count(), generator_resets);
+    this.fixture
+        .assert_whole_exact_source_guards_unpolled_for_test();
     assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
     assert_eq!(this.fixture.bytes(), before);
     assert!(!path.exists());
+}
+
+#[test]
+fn actual_whole_serial_exact_join_evidence_is_independent_of_foreign_collector_failure() {
+    let mut this = SerialApp::new();
+    // Other ordinary global-observer fixtures share this Fixture's admission.
+    // The strict-clone summary test instead holds the helper lock. Take it in
+    // Fixture -> helper order, and never publish a false hook to an unknown run.
+    let _helper_observer_admission = crate::plugins::helper_transport_test_lock();
+    let before = this.fixture.bytes();
+    let ids = this.ids();
+    let path = this.begin_held_second();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let foreign = crate::genuine_app_observer::ObservationRun::install()
+                    .expect("source-only SerialApp must not own the global collector");
+                crate::genuine_app_observer::record_hooks("foreign-test-only override", false);
+                let failed_foreign = foreign.finish();
+                // This run is deliberately invalid, not evidence for our sources.
+                // Concurrent unrelated taps may already have latched another first
+                // failure; neither that failure nor this hook can be cleared.
+                assert!(failed_foreign.failure.is_some());
+            })
+            .join()
+            .expect("foreign tap owner actually terminated");
+    });
+    this.fixture
+        .assert_whole_exact_source_guards_unpolled_for_test();
+    assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
+    assert_eq!(this.fixture.bytes(), before);
+    this.fixture.force_drop_app_for_whole_test();
+    this.dropped = true;
+    assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
+    this.effects[1].release_all();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while this.fixture.whole_exact_worker_join_count_for_test(&ids) != 3 {
+        assert!(
+            Instant::now() < deadline,
+            "Exact source joins did not return"
+        );
+        std::thread::yield_now();
+    }
+    assert!(!path.exists());
+    // Retire the original Fixture before releasing the other observer's lock.
+    drop(this);
 }
 
 #[test]

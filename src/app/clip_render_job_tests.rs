@@ -348,6 +348,11 @@ struct RetainedFailedFixture {
     _verifier: Option<crate::occurrence_media::VerificationTestGuard>,
     _admission: Option<std::sync::MutexGuard<'static, ()>>,
     _whole_drop_observation: Option<WholeDropObservation>,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    _whole_join_controls: Vec<plugins::plugin_runtime::PluginChainControl>,
 }
 thread_local! {
     // At most one failed fixture can occupy this emergency owner. It never
@@ -365,6 +370,11 @@ pub(in crate::app) struct Fixture {
     verifier_guard: Option<crate::occurrence_media::VerificationTestGuard>,
     admission_guard: Option<std::sync::MutexGuard<'static, ()>>,
     cleanup_budget: Duration,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    whole_join_controls: Vec<plugins::plugin_runtime::PluginChainControl>,
 }
 impl Fixture {
     pub(in crate::app) fn app(&self) -> &CitrusApp {
@@ -556,6 +566,11 @@ impl Fixture {
             verifier_guard: Some(verifier_guard),
             admission_guard: Some(admission),
             cleanup_budget: Duration::from_secs(10),
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            whole_join_controls: Vec::new(),
         };
         if let Some(observer) = whole_drop_observer {
             WHOLE_DROP_OBSERVATION.with(|slot| {
@@ -668,7 +683,10 @@ impl Fixture {
         feature = "experimental-fresh-helper"
     ))]
     pub(in crate::app) fn force_drop_app_for_whole_test(&mut self) {
-        WHOLE_DROP_OBSERVATION.with(|slot| assert!(slot.borrow().is_some()));
+        assert!(
+            !self.whole_join_controls.is_empty()
+                || WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_some())
+        );
         assert!(self.app.whole_song_export_fence_active());
         assert_eq!(self.app.running_generator_chains.len(), 1);
         assert_eq!(
@@ -721,14 +739,85 @@ impl Fixture {
         feature = "experimental-fresh-helper"
     ))]
     pub(in crate::app) fn whole_exact_worker_join_count_for_test(&self, ids: &[usize]) -> usize {
-        WHOLE_DROP_OBSERVATION.with(|slot| {
-            slot.borrow().as_ref().expect("Actual observation owner retained").observer.with_snapshot(|snapshot| {
-                assert!(snapshot.failure.is_none(), "Actual join observation was incomplete");
-                snapshot.records.iter().filter(|record| matches!(record.kind,
-                    crate::genuine_app_observer::RecordKind::WorkerJoin { worker_id, outcome: crate::genuine_app_observer::WorkerJoinOutcome::Joined }
-                    if ids.contains(&worker_id))).count()
+        use plugins::plugin_runtime::RetainedJoinObservation::*;
+        assert_eq!(ids.len(), self.whole_join_controls.len());
+        let observed_ids: std::collections::BTreeSet<_> = self
+            .whole_join_controls
+            .iter()
+            .map(|control| control.genuine_worker_id())
+            .collect();
+        assert_eq!(observed_ids.len(), self.whole_join_controls.len());
+        assert_eq!(observed_ids, ids.iter().copied().collect());
+        self.whole_join_controls
+            .iter()
+            .filter(|control| {
+                let stats = control.stats();
+                assert_eq!(
+                    (stats.detached_workers, stats.shutdown_timeouts),
+                    (0, 0),
+                    "Actual source {} lost its retained shutdown owner",
+                    control.genuine_worker_id()
+                );
+                let observation = control.genuine_retained_join_observation();
+                assert!(
+                    !matches!(
+                        observation,
+                        PanickedJoinReturned | PanickedJoinObserverCallReturned
+                    ),
+                    "Actual source {} joined with panic: {observation:?}",
+                    control.genuine_worker_id()
+                );
+                matches!(
+                    observation,
+                    HealthyJoinReturned | HealthyJoinObserverCallReturned
+                )
             })
-        })
+            .count()
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn retain_whole_exact_join_sources_for_test(&mut self) {
+        use plugins::plugin_runtime::RetainedJoinObservation;
+        assert!(self.whole_join_controls.is_empty());
+        assert!(WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_none()));
+        // Retain only the original control Arcs, not another worker/backend.
+        // The guard writes this witness only after its real JoinHandle returns.
+        self.whole_join_controls = self
+            .app
+            .running_generator_chains
+            .values()
+            .map(|source| source.control.clone())
+            .chain(
+                self.app
+                    .running_insert_chains
+                    .values()
+                    .map(|source| source.control.clone()),
+            )
+            .collect();
+        assert_eq!(self.whole_join_controls.len(), 3);
+        assert!(
+            self.whole_join_controls
+                .iter()
+                .all(|control| control.genuine_retained_join_observation()
+                    == RetainedJoinObservation::NotPolled)
+        );
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn assert_whole_exact_source_guards_unpolled_for_test(&self) {
+        assert!(!self.whole_join_controls.is_empty());
+        for control in &self.whole_join_controls {
+            assert_eq!(
+                control.genuine_retained_join_observation(),
+                plugins::plugin_runtime::RetainedJoinObservation::NotPolled,
+                "Healthy source {} received a retained shutdown poll",
+                control.genuine_worker_id()
+            );
+        }
     }
     #[cfg(all(
         any(target_os = "linux", windows),
@@ -793,6 +882,28 @@ impl Fixture {
         })
     }
     fn whole_drop_join_proven(&self) -> Result<bool, &'static str> {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if !self.whole_join_controls.is_empty() {
+            use plugins::plugin_runtime::RetainedJoinObservation::*;
+            let mut all_joined = true;
+            for control in &self.whole_join_controls {
+                let stats = control.stats();
+                if stats.detached_workers != 0 || stats.shutdown_timeouts != 0 {
+                    return Err("exact Whole source worker was detached or timed out");
+                }
+                match control.genuine_retained_join_observation() {
+                    HealthyJoinReturned | HealthyJoinObserverCallReturned => {}
+                    PanickedJoinReturned | PanickedJoinObserverCallReturned => {
+                        return Err("exact Whole source worker joined with panic");
+                    }
+                    NotPolled | LastPollSawUnfinished | LastPollSawFinished => all_joined = false,
+                }
+            }
+            return Ok(all_joined);
+        }
         WHOLE_DROP_OBSERVATION.with(|slot| {
             let slot = slot.borrow();
             let observed = slot
@@ -1135,6 +1246,11 @@ impl Drop for Fixture {
                 _admission: self.admission_guard.take(),
                 _whole_drop_observation: WHOLE_DROP_OBSERVATION
                     .with(|slot| slot.borrow_mut().take()),
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
+                _whole_join_controls: std::mem::take(&mut self.whole_join_controls),
             };
             RETAINED_FAILED_FIXTURE.with(|slot| {
                 *slot.borrow_mut() = Some(std::mem::ManuallyDrop::new(retained));
