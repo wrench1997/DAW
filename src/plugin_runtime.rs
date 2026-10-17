@@ -27,7 +27,7 @@ use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 use crate::genuine_app_observer as genuine_observer;
 #[cfg(test)]
 #[path = "plugin_runtime_panic_boundary.rs"]
-mod panic_boundary;
+pub(crate) mod panic_boundary;
 #[cfg(all(test, feature = "vst3"))]
 use crate::genuine_app_observer::{Boundary, InstanceObserver, InstancePhase, Operation};
 
@@ -4812,6 +4812,8 @@ fn run_worker(
                     &metrics,
                 );
                 #[cfg(test)]
+                let publication_identity = (block.epoch, block.sequence);
+                #[cfg(test)]
                 let first_sequence_publication = (block.sequence == 1).then_some(block.epoch);
                 let _output_stage = metrics
                     .diagnostics
@@ -4819,9 +4821,10 @@ fn run_worker(
                 match output.push(block) {
                     Ok(()) => {
                         #[cfg(test)]
-                        if let Some(epoch) = first_sequence_publication {
-                            panic_boundary::process_output_published(epoch, 1);
-                        }
+                        panic_boundary::process_output_published(
+                            publication_identity.0,
+                            publication_identity.1,
+                        );
                         metrics.diagnostics.count_output_frames(frames);
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                     }

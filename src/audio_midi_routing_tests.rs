@@ -9,7 +9,8 @@ fn route_bridge_frames() -> u32 {
         .bridge_latency_frames
 }
 use crate::plugins::plugin_runtime::{MAX_PLUGIN_OUTPUT_EVENTS, PluginMidiBatch, PluginTransport};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use crate::plugins::plugin_runtime::panic_boundary;
 
 const SOURCE_CHANNEL: u32 = 11;
 const SINK_CHANNEL: u32 = 22;
@@ -40,6 +41,7 @@ struct MidiRouteProbe {
     active_notes: AtomicU32,
     resets: AtomicU32,
     failure: AtomicU32,
+    panic_trace: OnceLock<Arc<panic_boundary::Trace>>,
     latency_frames: AtomicU32,
 }
 
@@ -109,7 +111,10 @@ impl PluginBackend for MidiRouteBackend {
         if matches!(self.role, MidiTestRole::Source) {
             match self.probe.failure.load(Ordering::Acquire) {
                 2 => return Err("deliberate source process failure".into()),
-                3 => panic!("deliberate source process panic"),
+                3 => {
+                    let _unwind = self.probe.panic_trace.get().map(panic_boundary::panic_requested);
+                    panic!("deliberate source process panic");
+                }
                 _ => {}
             }
         }
@@ -585,15 +590,50 @@ impl MidiGraphFixture {
         self.wait_workers();
     }
 
+    fn worker_wait_context(&self, waiting_control: usize, submitted: u64) -> String {
+        let mut context = format!(
+            "waiting_control={waiting_control}; submitted_target={submitted}; failure_mode={}; device_frame={}; timeline_frame={}; panic_boundary={:?}",
+            self.source.failure.load(Ordering::Acquire),
+            self.transport.device_frame,
+            self.transport.timeline_frame,
+            self.source.panic_trace.get().map(|trace| (trace.terminal(), trace.snapshot())),
+        );
+        // Failure-only formatting: the driver is paused, and these snapshots do
+        // not consume events, receipts or outputs or call any backend method.
+        for (index, control) in self.controls.iter().enumerate() {
+            context.push_str(&format!("; control[{index}]={:?}", control.stats()));
+        }
+        for slot in self.dsp.generator_endpoints.iter().flatten() {
+            let name = match slot.channel_id {
+                SOURCE_CHANNEL => "source",
+                SINK_CHANNEL => "sink",
+                _ => "other generator",
+            };
+            context.push_str(&format!("; {name}={:?}", slot.endpoint.adapter.genuine_snapshot()));
+        }
+        for (index, slot) in self.dsp.insert_endpoints.iter().enumerate() {
+            if let Some(slot) = slot {
+                context.push_str(&format!("; insert[{index}]={:?}", slot.endpoint.adapter.genuine_snapshot()));
+            }
+        }
+        context
+    }
+
     fn wait_workers(&self) {
-        // Completion is acknowledged only after the worker has published output.
-        // A new epoch may instead account for a submitted block by discarding it.
-        for control in &self.controls {
+        // Preserve the original predicate and two-second deadline. Diagnostics
+        // distinguish a pending panic hook from a retired-but-uncredited input;
+        // they do not turn a timeout or discarded output into success.
+        for (index, control) in self.controls.iter().enumerate() {
             let submitted = control.stats().submitted;
-            wait_until(|| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
                 let stats = control.stats();
-                stats.completed + stats.dropped_old_epoch_inputs >= submitted || stats.stopped
-            });
+                if stats.completed + stats.dropped_old_epoch_inputs >= submitted || stats.stopped {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "timed out waiting for mock worker; {}", self.worker_wait_context(index, submitted));
+                thread::yield_now();
+            }
         }
     }
 
@@ -836,8 +876,33 @@ fn midi_port_graph_output_overflow_process_failure_and_panic_silence_held_notes(
         fixture.activate(2, 0);
         fixture.render_frames(2_560, 128);
         assert_eq!(fixture.sink.active_notes.load(Ordering::Acquire), 1);
+        let panic_trace = if failure == 3 {
+            let source = fixture.dsp.find_generator_slot(SOURCE_CHANNEL).unwrap();
+            let snapshot = fixture.dsp.generator_endpoints[source].as_ref().unwrap()
+                .endpoint.adapter.genuine_snapshot();
+            // The prior render waited for all submitted work. The driver owns
+            // submission and remains paused until this trace has been armed.
+            assert_eq!(snapshot.bridge.input_pending, 0);
+            assert_eq!(snapshot.bridge.stats.completed + snapshot.bridge.stats.dropped_old_epoch_inputs,
+                snapshot.bridge.stats.submitted);
+            let trace = panic_boundary::Trace::new(panic_boundary::Terminal::ProcessOutput {
+                epoch: snapshot.epoch,
+                sequence: snapshot.bridge.next_sequence,
+            });
+            assert!(fixture.source.panic_trace.set(Arc::clone(&trace)).is_ok());
+            Some(trace)
+        } else {
+            None
+        };
         fixture.source.failure.store(failure, Ordering::Release);
         fixture.render_frames(4_096, 128);
+        if let Some(trace) = panic_trace {
+            let phases = trace.snapshot();
+            assert!(phases.panic_requested_us.is_some(), "{phases:?}");
+            assert!(phases.unwind_started_us.is_some(), "{phases:?}");
+            assert!(phases.catch_returned_us.is_some(), "{phases:?}");
+            assert!(phases.terminal_published_us.is_some(), "{phases:?}");
+        }
         wait_until(|| fixture.sink.active_notes.load(Ordering::Acquire) == 0);
         let sink = fixture.dsp.find_generator_slot(SINK_CHANNEL).unwrap();
         assert_ne!(

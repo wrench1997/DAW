@@ -1,5 +1,14 @@
 # 当前开发状态
 
+## 2026-10-17 MIDI panic 等待诊断
+
+`98b6fa5` quality `39031653600` 首次在未修改的 factory 探测夹具 3 秒预算内超时；保留原失败后，仅作一次同源码失败任务复现，attempt 2 全部成功。不能把重跑通过说成该历史超时已修复。preview `39031653598` 在 MIDI 路由异常恢复测试的 mode 3 panic 后等待 mock worker 超时，2,553 通过、1 失败、21 忽略；已修的拓扑与 stdout 用例通过。
+
+本轮仅增加失败诊断：按源 worker 的实际 epoch/next sequence 绑定现有 panic trace，区分进入 panic、展开、catch 返回、结果发布；输出源/插入/接收端命名计数和只读 settlement 快照。保持原 2 秒等待、原谓词、声音静默/不复活断言。所有新增运行时 trace 入口均 cfg(test)，不修改生产处理或全局 panic hook。旧输出丢弃计数可能与 completed 重复，因此只显示诊断，不加入完成条件。
+
+Linux 精确用例、MIDI routing 27 项、panic-boundary 3 项通过；严格 all-feature/all-target Clippy、no-default/all-target check、fmt 通过，独立审查通过。Windows 具体根因仍未确定，本诊断不冒称修复。详 `docs/MIDI_PANIC_WAIT_DIAGNOSTICS.md`。新精确提交的 Windows CI 待执行。
+
+
 ## 2026-10-17 关闭通道后的测试退出路径
 
 `36f7d0b` preview `39029992025` 成功；quality `39029992024` 的 held-getter 用例失败，诊断明确显示晚回复写入 EINVAL、强制退出码 1、真实进程已回收，但没有后续协议完成标记。可以定位到标记之前，不能证明具体阻塞操作。

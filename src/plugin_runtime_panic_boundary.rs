@@ -11,19 +11,19 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Terminal {
+pub(crate) enum Terminal {
     ProcessOutput { epoch: u64, sequence: u64 },
     ParameterReceipt(u64),
 }
 
-pub(super) struct Trace {
+pub(crate) struct Trace {
     started: Instant,
     terminal: Terminal,
     phases: [AtomicU64; 4],
 }
 
 #[derive(Debug)]
-pub(super) struct Snapshot {
+pub(crate) struct Snapshot {
     pub elapsed_us: u64,
     pub panic_requested_us: Option<u64>,
     pub unwind_started_us: Option<u64>,
@@ -32,7 +32,7 @@ pub(super) struct Snapshot {
 }
 
 impl Trace {
-    pub(super) fn new(terminal: Terminal) -> Arc<Self> {
+    pub(crate) fn new(terminal: Terminal) -> Arc<Self> {
         Arc::new(Self {
             started: Instant::now(),
             terminal,
@@ -57,7 +57,11 @@ impl Trace {
         );
     }
 
-    pub(super) fn snapshot(&self) -> Snapshot {
+    pub(crate) fn terminal(&self) -> Terminal {
+        self.terminal
+    }
+
+    pub(crate) fn snapshot(&self) -> Snapshot {
         // Observe later phases first. Seeing their Release publication then
         // reading earlier phases must not manufacture a missing predecessor.
         let read = |phase: usize| self.phases[phase].load(Ordering::Acquire).checked_sub(1);
@@ -98,7 +102,7 @@ thread_local! {
     static ACTIVE: RefCell<Option<Arc<Trace>>> = const { RefCell::new(None) };
 }
 
-pub(super) struct UnwindProbe(Arc<Trace>);
+pub(crate) struct UnwindProbe(Arc<Trace>);
 
 impl Drop for UnwindProbe {
     fn drop(&mut self) {
@@ -108,7 +112,7 @@ impl Drop for UnwindProbe {
     }
 }
 
-pub(super) fn panic_requested(trace: &Arc<Trace>) -> UnwindProbe {
+pub(crate) fn panic_requested(trace: &Arc<Trace>) -> UnwindProbe {
     ACTIVE.with(|active| *active.borrow_mut() = Some(Arc::clone(trace)));
     trace.mark(0);
     UnwindProbe(Arc::clone(trace))
@@ -141,4 +145,28 @@ pub(super) fn process_output_published(epoch: u64, sequence: u64) {
 
 pub(super) fn parameter_receipt_published(edit_id: u64) {
     terminal_published(Terminal::ParameterReceipt(edit_id));
+}
+
+#[test]
+fn process_publication_requires_exact_worker_epoch_and_later_sequence() {
+    let trace = Trace::new(Terminal::ProcessOutput {
+        epoch: 7,
+        sequence: 23,
+    });
+    let probe = panic_requested(&trace);
+    // A different worker cannot publish this thread's active trace, even with
+    // the same block identity. No process-wide panic hook is installed.
+    std::thread::spawn(|| process_output_published(7, 23))
+        .join()
+        .unwrap();
+    assert!(trace.snapshot().terminal_published_us.is_none());
+    process_output_published(8, 23);
+    process_output_published(7, 22);
+    process_output_published(7, 1);
+    assert!(trace.snapshot().terminal_published_us.is_none());
+    catch_returned();
+    process_output_published(7, 23);
+    assert!(trace.snapshot().terminal_published_us.is_some());
+    assert!(ACTIVE.with(|active| active.borrow().is_none()));
+    drop(probe);
 }
