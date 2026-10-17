@@ -1,5 +1,14 @@
 # 当前开发状态
 
+## 2026-10-17 拓扑测试观察时限修正
+
+`6f40464` 的 preview `39028484382` 已成功；quality `39028484318` 为 2,551 通过、1 失败、21 忽略，失败在 strict dry-topology 测试等待终止确认。没有原始子进程审计，实际停滞阶段未知，不能由另一条成功推断故障原因。
+
+确认的测试合同错误：通用观察仅等待 15 秒，但该作业本身允许 20 秒渲染。现在仅测试观察窗口按原始作业期限、既有清理 grace 和明确有限观察余量计算并冻结，增加 receipt/ledger/audit 的超时证据；不修改生产期限、不把清理 grace 误称 OS 回收上限。成功结果与真实回收断言保留。
+
+相关 strict-backend 43 项、严格 all-feature/all-target Clippy、fmt 均通过，独立审查通过。本修正的新 Windows CI 尚待执行。详 `docs/qa/20261017-windows-topology-reporting-wait.md`。
+
+
 ## 2026-10-17 多选拖动性能
 
 基线 `39dfb20` 已通过 Windows quality `39026441380` 和 preview `39026441360`，包括静态 CRT ZIP/提取 helper 校验；先前失败的 held-getter 用例通过。上传步骤仍关闭，没有发布安装包。

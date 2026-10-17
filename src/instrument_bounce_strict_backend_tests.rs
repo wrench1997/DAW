@@ -918,7 +918,7 @@ fn audit(root: &Path, value: Value) {
     writeln!(file, "{value}").unwrap();
 }
 
-// Only the blocked-stage matrix uses these diagnostics. Do not replace an
+// Bounded fixture diagnostics are best-effort observations. Do not replace an
 // unobserved planned stage with a guessed timeout/cancel success.
 fn blocked_stage_text(value: &str) -> Value {
     let mut end = value
@@ -1106,6 +1106,63 @@ impl Drop for Audited {
     }
 }
 
+// Mirror run_with_disposal's five-second reporting grace. This is not an OS
+// termination bound: production retains ownership and polls after grace expires.
+const FIXTURE_CLEANUP_REPORTING_GRACE: Duration = Duration::from_secs(5);
+const FIXTURE_TERMINAL_OBSERVER_ALLOWANCE: Duration = Duration::from_secs(1);
+
+struct TerminalReportingWindow {
+    deadline: Instant,
+}
+impl TerminalReportingWindow {
+    fn new(now: Instant, render_deadline: Instant) -> Self {
+        Self {
+            deadline: now
+                .max(render_deadline)
+                .checked_add(FIXTURE_CLEANUP_REPORTING_GRACE)
+                .and_then(|deadline| deadline.checked_add(FIXTURE_TERMINAL_OBSERVER_ALLOWANCE))
+                .expect("fixture terminal reporting deadline overflow"),
+        }
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
+#[test]
+fn strict_fixture_terminal_reporting_wait_covers_original_deadline_and_is_finite() {
+    let now = Instant::now();
+    let original_deadline = now + Duration::from_secs(20);
+    let window = TerminalReportingWindow::new(now, original_deadline);
+    let report_deadline = window.deadline;
+    assert!(report_deadline > original_deadline);
+    assert!(now + Duration::from_secs(15) < report_deadline);
+    assert_eq!(report_deadline.duration_since(now), Duration::from_secs(26));
+    assert!(!window.expired(original_deadline));
+    assert!(!window.expired(report_deadline - Duration::from_nanos(1)));
+    assert!(window.expired(report_deadline));
+    assert!(window.expired(report_deadline + Duration::from_secs(60)));
+    assert_eq!(
+        window.deadline, report_deadline,
+        "polls cannot renew the window"
+    );
+    // Entering finish after an expired render still permits observation of its
+    // cleanup, but neither repeated polls nor elapsed time renew this deadline.
+    let late = original_deadline + Duration::from_secs(1);
+    assert_eq!(
+        TerminalReportingWindow::new(late, original_deadline)
+            .deadline
+            .duration_since(late),
+        Duration::from_secs(6)
+    );
+    assert_eq!(
+        TerminalReportingWindow::new(now, now)
+            .deadline
+            .duration_since(now),
+        Duration::from_secs(6)
+    );
+}
+
 // Receipt Drop alone cancels but is not a join. This guard always drains the
 // admission, including when an assertion panics, before Mock can delete paths.
 struct Job<'a> {
@@ -1140,7 +1197,41 @@ impl<'a> Job<'a> {
     }
     fn finish(&self) -> RenderOutcome {
         let receipt = self.receipt.as_ref().unwrap();
-        wait_until(|| receipt.termination_acknowledged());
+        let wait_started = Instant::now();
+        let reporting_window = TerminalReportingWindow::new(wait_started, self.control.deadline);
+        while !receipt.termination_acknowledged() {
+            if reporting_window.expired(Instant::now()) {
+                // Recheck after the clock read so a concurrently completed job
+                // can still take the normal outcome/assertion path below.
+                if receipt.termination_acknowledged() {
+                    break;
+                }
+                let ledger = self.mock.ledger();
+                let observations = self.mock.audit();
+                let evidence = json!({
+                    "kind":"terminal_reporting_wait_expired",
+                    "elapsed_ms":wait_started.elapsed().as_millis(),
+                    "original_render_deadline_elapsed":Instant::now() >= self.control.deadline,
+                    "original_render_deadline_unchanged":true,
+                    "termination_acknowledged":receipt.termination_acknowledged(),
+                    "actual_receipt_status":format!("{:?}",receipt.status()),
+                    "admission_busy":self.admission.is_busy(),
+                    "result_observation":"not consumed; receipt gates outcome on termination acknowledgement",
+                    "input":self.mock.input,"channels":self.mock.channels,
+                    "extra_outputs":self.mock.extra_outputs,
+                    "last_command":ledger.iter().rev().find(|row|row["kind"]=="command"),
+                    "ledger_and_audit_snapshot":"best effort; unreadable or partial JSON lines may be omitted",
+                    "ledger_rows":ledger.len(),
+                    "ledger_tail":blocked_stage_text(&serde_json::to_string(&ledger[ledger.len().saturating_sub(8)..]).unwrap()),
+                    "audit_rows":observations.len(),
+                    "audit_tail":blocked_stage_text(&serde_json::to_string(&observations[observations.len().saturating_sub(8)..]).unwrap()),
+                    "cleanup_grace_is_not_an_os_reap_bound":true
+                });
+                audit(&self.mock.root, evidence.clone());
+                panic!("mock terminal reporting wait expired: {evidence}");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
         let result = receipt.try_recv().unwrap();
         assert_eq!(receipt.status(), RenderStatus::Terminated);
         assert!(!self.admission.is_busy());
