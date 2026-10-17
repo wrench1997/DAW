@@ -475,6 +475,20 @@ while True:
         encoded = json.dumps(response, separators=(',', ':'))
         log('late_complete_snapshot', stage=stage, snapshot=response,
             encoded_bytes=len(encoded.encode('utf-8')))
+        if cfg.get('late_stdout_mode') == 'failed_write_trap':
+            class FailedWriteTrap:
+                def write(self, value):
+                    raise OSError(22, 'injected closed stdout')
+                def flush(self):
+                    log('late_stdout_trap', operation='flush')
+                    time.sleep(30)
+                def __del__(self):
+                    log('late_stdout_trap', operation='destroy')
+                    time.sleep(30)
+            # Sole owner: replacing stdout would synchronously destroy this
+            # object. The terminal path must not flush or replace it afterward.
+            sys.stdout = FailedWriteTrap()
+        log('late_snapshot_write_attempt', stage=stage)
         try:
             print(encoded, flush=True)
         except OSError as error:
@@ -485,14 +499,18 @@ while True:
                 error_type=type(error).__name__, errno=error.errno,
                 winerror=getattr(error, 'winerror', None),
                 message=str(error))
-            sys.stdout = open(os.devnull, 'w')
+            # Do not replace, close or flush the failed stream. Replacement
+            # can itself run stream cleanup; this path needs only the ledger
+            # before os._exit, and the negative control deliberately finalizes.
         else:
             log('late_snapshot_written', stage=stage)
         # This synthetic child owns no plugin. Do not make the protocol test
         # depend on Python finalization inside the unchanged 100 ms terminal
         # cleanup window. This marker is exit intent, never proof of OS exit.
         log('late_protocol_complete', stage=stage)
-        if cfg.get('late_exit_mode') == 'blocked_finalizer':
+        exit_mode = cfg.get('late_exit_mode', 'immediate')
+        log('late_exit_selected', stage=stage, mode=exit_mode)
+        if exit_mode == 'blocked_finalizer':
             def blocked_finalizer():
                 log('late_finalizer_blocked', stage=stage)
                 time.sleep(30)
@@ -3307,107 +3325,148 @@ fn strict_selected_bundle_actual_event_admission_calls_no_latency_or_tail() {
 fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_without_publish() {
     let _serial = serial();
     for cancel in [true, false] {
-        let mock = Mock::new("late_after_eof", "LatencySamples:1").with_selected_stereo();
-        let (project, capture) = mock.capture();
-        let original = selected_source_project_snapshot(&project);
-        let state = capture.state.clone();
-        let job = Job::start(
-            &mock,
-            Hook::None,
-            if cancel {
-                Duration::from_secs(20)
-            } else {
-                Duration::from_secs(2)
-            },
-        );
-        mock.wait_stage("blocked", "LatencySamples:1");
-        assert!(job.admission.is_busy());
-        if cancel {
-            assert!(job.control.export.clone().cancel());
-        }
-        let outcome = job.finish();
-        report_late_bundle_terminal(&mock, cancel, &outcome);
-        let failure = failed(outcome);
-        if !cancel {
-            assert!(Instant::now() >= job.control.deadline);
-        }
-        assert_typed(
-            &failure,
-            if cancel {
-                StrictKind::Cancelled
-            } else {
-                StrictKind::Deadline
-            },
-            BackendDelivery::MayHaveApplied,
-        );
-        assert_exchange_context(
-            &failure,
-            "prepare.final_metadata.bundle",
-            "StrictMetadataSnapshot",
-        );
-        assert_eq!(
-            failure.backend.as_ref().unwrap().strict_metadata_getter,
-            None
-        );
-        let ledger = mock.ledger();
-        let eof = ledger
-            .iter()
-            .position(|row| row["kind"] == "late_getter_terminal_eof")
-            .unwrap();
-        let held_done = ledger
-            .iter()
-            .position(|row| row["kind"] == "late_getter_completed")
-            .unwrap();
-        let tail = ledger
-            .iter()
-            .position(|row| row["kind"] == "metadata_getter" && row["getter"] == "TailSamples")
-            .unwrap();
-        let complete = ledger
-            .iter()
-            .position(|row| row["kind"] == "late_complete_snapshot")
-            .unwrap();
-        assert!(eof < held_done && held_done < tail && tail < complete);
-        let snapshot = &ledger[complete]["snapshot"]["StrictMetadataSnapshot"]["snapshot"];
-        assert!(snapshot["audio"].is_object() && snapshot["events"].is_object());
-        assert_eq!(snapshot["latency_samples"], mock.latency);
-        assert_eq!(snapshot["tail_samples"], u32::MAX);
-        let write_outcomes: Vec<_> = ledger
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                row["kind"] == "late_snapshot_write_failed"
-                    || row["kind"] == "late_snapshot_written"
-            })
-            .collect();
-        assert_eq!(write_outcomes.len(), 1);
-        let (write_position, write_outcome) = write_outcomes[0];
-        assert_eq!(write_outcome["stage"], "StrictMetadataSnapshot:1");
-        if write_outcome["kind"] == "late_snapshot_write_failed" {
-            assert!(!write_outcome["error_type"].as_str().unwrap().is_empty());
-            assert!(write_outcome["errno"].as_i64().is_some());
-            assert!(!write_outcome["message"].as_str().unwrap().is_empty());
-        }
-        let exited = ledger.iter().position(|row| row["kind"] == "exit").unwrap();
-        assert!(complete < write_position && write_position < exited);
-        assert_eq!(ledger[exited]["evidence"], "protocol_complete_exit_intent");
-        // The marker above is only intent. A completed successful OS reap with
-        // no forced-termination/cleanup error is the independent exit proof.
-        assert!(mock.audit().iter().any(clean_child_reap_evidence));
-        assert!(
-            !mock
-                .commands()
-                .iter()
-                .any(|row| row.starts_with("Process:") || row.starts_with("SendMidiAt:"))
-        );
-        mock.assert_terminal_at("StrictMetadataSnapshot:1");
-        assert_eq!(selected_source_project_snapshot(&project), original);
-        assert_eq!(capture.state, state);
+        assert_late_bundle_terminal(cancel, false);
     }
 }
 
-// Historical Windows failure retained no audit artifact, so its exact cause is
-// unknown. Always print completed-attempt evidence before assertions; a later
-// failure must distinguish forced termination from a missing fixture marker.
+#[test]
+fn strict_selected_bundle_failed_stdout_is_not_replaced_or_finalized_before_reap() {
+    let _serial = serial();
+    for cancel in [true, false] {
+        assert_late_bundle_terminal(cancel, true);
+    }
+}
+
+fn assert_late_bundle_terminal(cancel: bool, failed_stdout_trap: bool) {
+    let mock = Mock::new("late_after_eof", "LatencySamples:1").with_selected_stereo();
+    if failed_stdout_trap {
+        let path = mock.root.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["late_stdout_mode"] = json!("failed_write_trap");
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    }
+    let (project, capture) = mock.capture();
+    let original = selected_source_project_snapshot(&project);
+    let state = capture.state.clone();
+    let job = Job::start(
+        &mock,
+        Hook::None,
+        if cancel {
+            Duration::from_secs(20)
+        } else {
+            Duration::from_secs(2)
+        },
+    );
+    mock.wait_stage("blocked", "LatencySamples:1");
+    assert!(job.admission.is_busy());
+    if cancel {
+        assert!(job.control.export.clone().cancel());
+    }
+    let outcome = job.finish();
+    report_late_bundle_terminal(&mock, cancel, &outcome);
+    let failure = failed(outcome);
+    if !cancel {
+        assert!(Instant::now() >= job.control.deadline);
+    }
+    assert_typed(
+        &failure,
+        if cancel {
+            StrictKind::Cancelled
+        } else {
+            StrictKind::Deadline
+        },
+        BackendDelivery::MayHaveApplied,
+    );
+    assert_exchange_context(
+        &failure,
+        "prepare.final_metadata.bundle",
+        "StrictMetadataSnapshot",
+    );
+    assert_eq!(
+        failure.backend.as_ref().unwrap().strict_metadata_getter,
+        None
+    );
+    let ledger = mock.ledger();
+    let eof = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_getter_terminal_eof")
+        .unwrap();
+    let held_done = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_getter_completed")
+        .unwrap();
+    let tail = ledger
+        .iter()
+        .position(|row| row["kind"] == "metadata_getter" && row["getter"] == "TailSamples")
+        .unwrap();
+    let complete = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_complete_snapshot")
+        .unwrap();
+    assert!(eof < held_done && held_done < tail && tail < complete);
+    let snapshot = &ledger[complete]["snapshot"]["StrictMetadataSnapshot"]["snapshot"];
+    assert!(snapshot["audio"].is_object() && snapshot["events"].is_object());
+    assert_eq!(snapshot["latency_samples"], mock.latency);
+    assert_eq!(snapshot["tail_samples"], u32::MAX);
+    let write_outcomes: Vec<_> = ledger
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row["kind"] == "late_snapshot_write_failed" || row["kind"] == "late_snapshot_written"
+        })
+        .collect();
+    assert_eq!(write_outcomes.len(), 1);
+    let (write_position, write_outcome) = write_outcomes[0];
+    assert_eq!(write_outcome["stage"], "StrictMetadataSnapshot:1");
+    if write_outcome["kind"] == "late_snapshot_write_failed" {
+        assert!(!write_outcome["error_type"].as_str().unwrap().is_empty());
+        assert!(write_outcome["errno"].as_i64().is_some());
+        assert!(!write_outcome["message"].as_str().unwrap().is_empty());
+    }
+    let attempt = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_snapshot_write_attempt")
+        .unwrap();
+    let protocol_complete = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_protocol_complete")
+        .unwrap();
+    let exit_selected = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_exit_selected")
+        .unwrap();
+    assert!(complete < attempt && attempt < write_position && write_position < protocol_complete);
+    assert!(protocol_complete < exit_selected);
+    assert_eq!(ledger[exit_selected]["mode"], "immediate");
+    assert!(!ledger.iter().any(|row| row["kind"] == "late_stdout_trap"));
+    if failed_stdout_trap {
+        assert_eq!(write_outcome["kind"], "late_snapshot_write_failed");
+        assert_eq!(write_outcome["errno"], 22);
+        assert_eq!(
+            write_outcome["message"],
+            "[Errno 22] injected closed stdout"
+        );
+    }
+    let exited = ledger.iter().position(|row| row["kind"] == "exit").unwrap();
+    assert!(exit_selected < exited);
+    assert_eq!(ledger[exited]["evidence"], "protocol_complete_exit_intent");
+    // The marker above is only intent. A completed successful OS reap with
+    // no forced-termination/cleanup error is the independent exit proof.
+    assert!(mock.audit().iter().any(clean_child_reap_evidence));
+    assert!(
+        !mock
+            .commands()
+            .iter()
+            .any(|row| row.starts_with("Process:") || row.starts_with("SendMidiAt:"))
+    );
+    mock.assert_terminal_at("StrictMetadataSnapshot:1");
+    assert_eq!(selected_source_project_snapshot(&project), original);
+    assert_eq!(capture.state, state);
+}
+
+// The original 12a9b37 Windows failure retained no audit artifact. The later
+// 39029992024 failure captured the full ledger and forced-reap evidence. Always
+// print completed-attempt evidence before assertions to preserve that distinction.
 fn report_late_bundle_terminal(mock: &Mock, cancel: bool, outcome: &RenderOutcome) {
     eprintln!(
         "late-bundle-terminal {}",

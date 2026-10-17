@@ -1,5 +1,14 @@
 # 当前开发状态
 
+## 2026-10-17 关闭通道后的测试退出路径
+
+`36f7d0b` preview `39029992025` 成功；quality `39029992024` 的 held-getter 用例失败，诊断明确显示晚回复写入 EINVAL、强制退出码 1、真实进程已回收，但没有后续协议完成标记。可以定位到标记之前，不能证明具体阻塞操作。
+
+仅测试 mock 移除错误写入后不必要的 stdout 替换，直接走 ledger 记录与既有显式退出；增加写入/退出分支标记及明确标为合成的 poisoned-stream 回归。mutation probe 验证恢复旧替换会触发析构陷阱、阻止正常退出；这证明回归有效，不证明历史 Windows 根因。保留真实关闭管道用例、实际干净回收断言与强制退出反例，不改变生产时限或清理。
+
+selected-bundle 5 项、完整 strict backend 44 项、严格 all-feature/all-target Clippy、fmt 全通过，独立审查通过。下一次精确源码 Windows CI 仍待验证。详 `docs/qa/20261017-windows-late-getter-fixture.md`。
+
+
 ## 2026-10-17 拓扑测试观察时限修正
 
 `6f40464` 的 preview `39028484382` 已成功；quality `39028484318` 为 2,551 通过、1 失败、21 忽略，失败在 strict dry-topology 测试等待终止确认。没有原始子进程审计，实际停滞阶段未知，不能由另一条成功推断故障原因。

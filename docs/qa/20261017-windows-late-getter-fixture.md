@@ -34,3 +34,25 @@ Both tests print the completed attempt's outcome, ledger and disposal audit befo
 ## Combined integration gate
 
 After integration with compact editor controls, the strict backend filter passed **42/42** within the combined **273/273** exact-name bounded test run. Formatting, strict all-feature/all-target Clippy and all-feature binaries passed on the integrated source. This remains Linux source/fixture evidence; the next exact-candidate Windows run is pending.
+
+
+## Subsequent Windows failure and failed-stream repair
+
+The first repair did not qualify Windows. On source `36f7d0ba343a0c0ae04ff6413ccea1ca614b3a53`, quality run `39029992024` failed the same held-getter test at line 3390: **2,552 passed, 1 failed, 21 ignored**. Unlike the original failure, this run retained a complete diagnostic JSON record in its failed-job log.
+
+The failing attempt was cancellation. Its ledger proves actual host EOF, held-getter completion, remaining metadata and full snapshot assembly, followed by `late_snapshot_write_failed` with `OSError`, errno 22. There was no protocol-complete or exit-intent marker. The independent audit proves actual reap after forced termination, exit code 1, with the cancellation preserved as primary and cleanup failure separately reported. This is a valid fail-closed product terminal outcome, but it does not satisfy this fixture's intended positive clean-exit scenario.
+
+The next source operation after logging the failed write was `sys.stdout = open(os.devnull, 'w')`. That unnecessary open/reassignment was removed. The natural-exit path needs only ledger writes before `os._exit(0)`; the deliberate blocked-finalizer control likewise does not need stdout recovery. The captured interval does not prove which operation blocked: `sys.__stdout__` can retain the original stream, and process scheduling remains possible. No historical destructor root cause is claimed.
+
+A new regression uses a sole-owner synthetic stdout only after actual host EOF and snapshot assembly. Its write deterministically raises `OSError(22)`; subsequent flush or destruction logs a trap and blocks. Both cancellation and deadline paths must preserve snapshot/write/exit-branch ordering and independently prove clean OS reap. The original real-pipe scenario remains separate. New write-attempt and exit-branch markers make any later failure more attributable. No production deadline, cleanup contract or acceptance assertion was relaxed.
+
+Validation of this second repair:
+
+- Selected-bundle group: **5 passed, 0 failed** (4.52 s), including both new poisoned-stream paths, both existing real-pipe paths and forced-finalizer negative control.
+- Mutation probe extracted the actual Python branch: repaired code exited 0 without a trap; restoring stdout reassignment synchronously entered the observed destructor trap, did not reach protocol completion, and required termination. This proves the synthetic regression catches the removed hazard; it does not reproduce the Windows root cause.
+- Full strict-backend group: **44 passed, 0 failed** (74.63 s).
+- `cargo clippy --locked --all-features --all-targets -- -D warnings`: exit 0; pre-existing vendored `fetch_update` deprecation warning unchanged.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- New exact-source Windows validation: pending. Linux evidence does not supersede either failed Windows run.
+
+Local evidence is retained under tooling `logs/late-stdout-repair-selected.log`, `validation/late-stdout-repair/mutation-result.json`, and the accompanying `mutation_check.py`. Original Windows failed log and extracted JSON remain preserved as `windows-ci/39029992024-failed.log` and `windows-ci/39029992024-late-bundle.json`.
