@@ -18615,6 +18615,21 @@ impl CitrusApp {
             });
             return;
         }
+        let clip = self.project.clips[index].clone();
+        let clip_color = theme::color(clip.color);
+        inspector_identity(
+            ui,
+            &clip.name,
+            match clip.kind {
+                ClipKind::Pattern => "PATTERN CLIP",
+                ClipKind::Audio => "AUDIO CLIP",
+                ClipKind::Automation => "AUTOMATION CLIP",
+            },
+            clip_color,
+        );
+        if clip.kind == ClipKind::Automation {
+            self.automation_quick_controls(ui, &clip);
+        }
         let displayed_length = self.project.clip_length_beats(&self.project.clips[index]);
         let mut pattern_length_request = None;
         let mut follow_request = None;
@@ -18628,17 +18643,6 @@ impl CitrusApp {
             audio_source_offset_frame,
         ) = {
             let clip = &mut self.project.clips[index];
-            let clip_color = theme::color(clip.color);
-            inspector_identity(
-                ui,
-                &clip.name,
-                match clip.kind {
-                    ClipKind::Pattern => "PATTERN CLIP",
-                    ClipKind::Audio => "AUDIO CLIP",
-                    ClipKind::Automation => "AUTOMATION CLIP",
-                },
-                clip_color,
-            );
             inspector_section(ui, "IDENTITY", |ui| {
                 ui.label(RichText::new("Name").size(9.0).color(theme::MUTED));
                 ui.text_edit_singleline(&mut clip.name);
@@ -18771,6 +18775,116 @@ impl CitrusApp {
         }
     }
 
+    fn automation_quick_controls(&mut self, ui: &mut egui::Ui, clip: &Clip) {
+        let Some(automation_id) = clip.automation_id else {
+            return;
+        };
+        let Some(automation) = self
+            .project
+            .automation_lanes
+            .iter()
+            .find(|lane| lane.id == automation_id)
+        else {
+            return;
+        };
+        let mixer_track_ids = (0..self.project.mixer_tracks.len())
+            .filter_map(|slot| {
+                self.project
+                    .mixer_track_id_at_runtime_slot(slot)
+                    .map(|id| (slot, id))
+            })
+            .collect::<Vec<_>>();
+        let lane = &automation.lane;
+        let source_offset = clip.source_offset;
+        let clip_length = clip.length;
+        let curve = lane.curve();
+        let mut shape_request = None;
+        let shape_options_id = egui::Id::new(("automation-shape-options", automation_id));
+        let mut shape_options = ui.ctx().data_mut(|data| {
+            data.get_temp::<crate::automation::AutomationShapeOptions>(shape_options_id)
+                .unwrap_or_default()
+        });
+        inspector_section(ui, "AUTOMATION", |ui| {
+            ui.label(automation_target_label_with_slots(
+                lane.target(),
+                &mixer_track_ids,
+            ));
+            ui.label(automation_clip_value_readout(clip, lane, self.beat_position))
+                .on_hover_text("Selected clip's source curve at the song playhead, in native target units. This is not the final audible value: other placements, transport mode and runtime overrides can change the output.");
+            if clip.muted || !lane.is_enabled() {
+                ui.colored_label(
+                    theme::AMBER,
+                    if clip.muted {
+                        "Clip muted"
+                    } else {
+                        "Automation disabled"
+                    },
+                );
+            }
+            ui.menu_button("SHAPES", |ui| {
+                use crate::automation::AutomationShape;
+                ui.label("Replace this clip's source region");
+                ui.label(RichText::new("Edits all placements sharing this automation source.").small());
+                ui.add(egui::Slider::new(&mut shape_options.depth, 0.0..=1.0).text("Depth"))
+                    .on_hover_text("Fraction of the target's value range, centered at its midpoint.");
+                ui.add(egui::Slider::new(&mut shape_options.cycles, 1.0..=16.0).text("Cycles"))
+                    .on_hover_text("Repeats across this clip's source region; applies to Steps, Sine and Triangle.");
+                ui.add(egui::Slider::new(&mut shape_options.phase, 0.0..=1.0).text("Phase"))
+                    .on_hover_text("Cycle offset for Steps, Sine and Triangle.");
+                if curve == AutomationCurve::Hold {
+                    ui.label(RichText::new("Hold interpolation: curves play as small steps.").color(theme::AMBER));
+                }
+                for (shape, label) in [
+                    (AutomationShape::Rise, "Rise"),
+                    (AutomationShape::Fall, "Fall"),
+                    (AutomationShape::EasedRise, "Eased rise"),
+                    (AutomationShape::Steps, "Steps"),
+                    (AutomationShape::Sine, "Sine"),
+                    (AutomationShape::Triangle, "Triangle"),
+                ] {
+                    if ui.button(label).clicked() {
+                        shape_request = Some(shape);
+                        ui.close();
+                    }
+                }
+            }).response.on_hover_text("Generate points within the clip's source range. Shared placements also change. Outside points and interpolation are retained. Undo restores the previous shape.");
+        });
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(shape_options_id, shape_options));
+        if let Some(shape) = shape_request {
+            // Explicit candidate commit prevents the normal 500 ms edit coalescer
+            // from absorbing this whole-source operation into a preceding edit.
+            let mut candidate = self.project.clone();
+            let lane = &mut candidate
+                .automation_lanes
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .expect("inspected lane still exists")
+                .lane;
+            match lane.apply_shape(
+                f64::from(source_offset),
+                f64::from(source_offset) + f64::from(clip_length),
+                shape,
+                shape_options,
+            ) {
+                Ok(true) => {
+                    commit_explicit_project_history_transaction(
+                        &mut self.project,
+                        &mut self.history_snapshot,
+                        &mut self.history_fingerprint,
+                        &mut self.undo_stack,
+                        &mut self.redo_stack,
+                        &mut self.dirty,
+                        candidate,
+                    );
+                    self.automation_evaluator.reset();
+                }
+                Ok(false) => {}
+                Err(error) => self.notify(format!("Could not generate shape: {error}")),
+            }
+        }
+    }
+
     fn automation_inspector(
         &mut self,
         ui: &mut egui::Ui,
@@ -18836,12 +18950,6 @@ impl CitrusApp {
         let mut edit_request = None;
         let mut delete_request = None;
         let mut insert_request = false;
-        let mut shape_request = None;
-        let shape_options_id = egui::Id::new(("automation-shape-options", automation_id));
-        let mut shape_options = ui.ctx().data_mut(|data| {
-            data.get_temp::<crate::automation::AutomationShapeOptions>(shape_options_id)
-                .unwrap_or_default()
-        });
         inspector_section(ui, "AUTOMATION", |ui| {
             property_line(
                 ui,
@@ -18965,33 +19073,6 @@ impl CitrusApp {
                     ui.selectable_value(&mut curve, AutomationCurve::Hold, "Hold / step");
                 });
             automation.lane.set_curve(curve);
-            ui.menu_button("SHAPES", |ui| {
-                use crate::automation::AutomationShape;
-                ui.label("Replace this clip's source region");
-                ui.label(RichText::new("Edits all placements sharing this automation source.").small());
-                ui.add(egui::Slider::new(&mut shape_options.depth, 0.0..=1.0).text("Depth"))
-                    .on_hover_text("Fraction of the target's value range, centered at its midpoint.");
-                ui.add(egui::Slider::new(&mut shape_options.cycles, 1.0..=16.0).text("Cycles"))
-                    .on_hover_text("Repeats across this clip's source region; applies to Steps, Sine and Triangle.");
-                ui.add(egui::Slider::new(&mut shape_options.phase, 0.0..=1.0).text("Phase"))
-                    .on_hover_text("Cycle offset for Steps, Sine and Triangle.");
-                if curve == AutomationCurve::Hold {
-                    ui.label(RichText::new("Hold interpolation: curves play as small steps.").color(theme::AMBER));
-                }
-                for (shape, label) in [
-                    (AutomationShape::Rise, "Rise"),
-                    (AutomationShape::Fall, "Fall"),
-                    (AutomationShape::EasedRise, "Eased rise"),
-                    (AutomationShape::Steps, "Steps"),
-                    (AutomationShape::Sine, "Sine"),
-                    (AutomationShape::Triangle, "Triangle"),
-                ] {
-                    if ui.button(label).clicked() {
-                        shape_request = Some(shape);
-                        ui.close();
-                    }
-                }
-            }).response.on_hover_text("Generate points within the clip's source range. Shared placements also change. Outside points and interpolation are retained. Undo restores the previous shape.");
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("{} control points", points.len()))
@@ -19073,40 +19154,6 @@ impl CitrusApp {
             let _ = automation
                 .lane
                 .insert_point(AutomationPoint::new(position, value));
-        }
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(shape_options_id, shape_options));
-        if let Some(shape) = shape_request {
-            // Explicit candidate commit prevents the normal 500 ms edit coalescer
-            // from absorbing this whole-source operation into a preceding edit.
-            let mut candidate = self.project.clone();
-            let lane = &mut candidate
-                .automation_lanes
-                .iter_mut()
-                .find(|automation| automation.id == automation_id)
-                .expect("inspected lane still exists")
-                .lane;
-            match lane.apply_shape(
-                f64::from(source_offset),
-                f64::from(source_offset) + f64::from(clip_length),
-                shape,
-                shape_options,
-            ) {
-                Ok(true) => {
-                    commit_explicit_project_history_transaction(
-                        &mut self.project,
-                        &mut self.history_snapshot,
-                        &mut self.history_fingerprint,
-                        &mut self.undo_stack,
-                        &mut self.redo_stack,
-                        &mut self.dirty,
-                        candidate,
-                    );
-                    self.automation_evaluator.reset();
-                }
-                Ok(false) => {}
-                Err(error) => self.notify(format!("Could not generate shape: {error}")),
-            }
         }
     }
 
@@ -24503,41 +24550,43 @@ impl CitrusApp {
                     theme::AMBER
                 }),
             );
-            if !compact_piano {
-                assignment_ui(ui);
-            }
             ui.separator();
             ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES")
                 .on_hover_text("Show notes from other Channels — Alt+V");
+            ui.separator();
+            ui.menu_button("NOTE EDIT v", |ui| {
+                ui.set_width(440.0);
+                self.piano_clipboard_toolbar(ui, true);
+                ui.separator();
+                self.piano_range_toolbar(ui, true);
+                ui.separator();
+                ui.label("Selected note Channel");
+                assignment_ui(ui);
+            });
+            let scale_label = if self.piano_roll_state.snap_to_scale {
+                format!("SCALE / CHORD v · {} {} LOCK{}", pitch_class_label(self.piano_roll_state.scale_root), self.piano_roll_state.scale.label(), if self.piano_roll_state.tool == PianoRollTool::Stamp { format!(" · {}", self.piano_roll_state.chord_stamp.label()) } else { String::new() })
+            } else if self.piano_roll_state.tool == PianoRollTool::Stamp {
+                format!("SCALE / CHORD v · {}", self.piano_roll_state.chord_stamp.label())
+            } else {
+                "SCALE / CHORD v".to_owned()
+            };
+            ui.menu_button(scale_label, |ui| { ui.set_width(540.0); self.piano_scale_tools(ui); });
+            ui.menu_button("VIEW v", |ui| { self.piano_view_controls(ui); });
+            if ui.small_button("FIT NOTES").on_hover_text("Fit the active Channel's notes in the Piano grid").clicked() {
+                self.fit_active_piano_notes();
+            }
+            let range = self.piano_roll_state.repeat_range.map_or_else(|| "Range none".to_owned(), |r| format!("Range {:.2}–{:.2}", r.start,r.end));
+            let paste = self.piano_paste_anchor().map_or_else(|_| "Paste invalid".to_owned(),|beat|format!("Paste {beat:.2}"));
+            ui.allocate_ui_with_layout(Vec2::new(if compact_piano { 136.0 } else { 222.0 }, 18.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.set_min_width(if compact_piano { 136.0 } else { 222.0 });
+                ui.label(RichText::new(if compact_piano { range } else { format!("{range} · {paste}") }).size(9.0).color(theme::ORANGE))
+                .on_hover_text("Edit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
+            });
         });
         if target_channel_changed {
             self.selected_channel = target_channel_index;
             self.piano_roll_state.selection_ids.clear();
             self.sync_piano_range_owner();
-        }
-        if compact_piano {
-            ui.horizontal_wrapped(|ui| {
-                ui.menu_button("NOTE EDIT v", |ui| {
-                    ui.set_width(440.0);
-                    self.piano_clipboard_toolbar(ui, true);
-                    ui.separator();
-                    self.piano_range_toolbar(ui, true);
-                    ui.separator();
-                    ui.label("Selected note Channel");
-                    assignment_ui(ui);
-                });
-                ui.menu_button("SCALE / CHORD v", |ui| { ui.set_width(540.0); self.piano_scale_tools(ui); });
-                ui.menu_button("VIEW v", |ui| { self.piano_view_controls(ui); });
-                let range = self.piano_roll_state.repeat_range.map_or_else(|| "Range none".to_owned(), |r| format!("Range {:.2}–{:.2}", r.start,r.end));
-                let paste = self.piano_paste_anchor().map_or_else(|_| "Paste invalid".to_owned(),|beat|format!("Paste {beat:.2}"));
-                ui.label(RichText::new(format!("{range} · {paste}")).size(9.0).color(theme::ORANGE))
-                    .on_hover_text("Edit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
-            });
-        } else {
-            self.piano_clipboard_toolbar(ui, false);
-            self.piano_range_toolbar(ui, false);
-            self.piano_scale_tools(ui);
-            self.piano_view_controls(ui);
         }
         if assignment_changed {
             let selected = expand_note_group_selection(
@@ -29166,6 +29215,26 @@ fn midi_note_name(note: u8) -> String {
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     ];
     format!("{}{}", NAMES[note as usize % 12], note as i16 / 12 - 1)
+}
+
+fn automation_clip_value_readout(clip: &Clip, lane: &AutomationLane, beat: f32) -> String {
+    if !beat.is_finite() || !automation_points::valid_clip_span(clip) {
+        return "At playhead: unavailable".into();
+    }
+    if beat < clip.start || beat >= clip.start + clip.length {
+        return "At playhead: outside clip".into();
+    }
+    let source = f64::from(clip.source_offset + (beat - clip.start));
+    if !lane.is_enabled() {
+        return "At playhead: automation disabled".into();
+    }
+    let Some(value) = lane.evaluate(source) else {
+        return "At playhead: no points".into();
+    };
+    match lane.target() {
+        AutomationTarget::Tempo => format!("At playhead: {value:.2} BPM (curve)"),
+        _ => format!("At playhead: {value:.3} (curve)"),
+    }
 }
 
 fn automation_curve_label(curve: AutomationCurve) -> &'static str {

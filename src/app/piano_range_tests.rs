@@ -165,6 +165,7 @@ fn piano_range_ruler_is_half_open_group_aware_and_clear_preserves_notes() {
     assert_range(&ui, 0.25, 0.5);
     ui.key(egui::Key::A, piano_clipboard_command());
     let selection = ui.app.piano_roll_state.selection_ids.clone();
+    ui.click("NOTE EDIT v");
     ui.click("Clear range");
     assert!(ui.app.piano_roll_state.repeat_range.is_none());
     assert_eq!(ui.app.piano_roll_state.selection_ids, selection);
@@ -749,6 +750,7 @@ fn piano_range_triplet_wide_and_minimum_layouts_keep_controls_on_screen() {
     ui.size = Vec2::new(1080.0, 680.0);
     ui.settle();
     let screen = Rect::from_min_size(Pos2::ZERO, ui.size);
+    ui.click("NOTE EDIT v");
     for label in [
         "Range from selection",
         "Range left",
@@ -770,11 +772,14 @@ fn piano_range_triplet_wide_and_minimum_layouts_keep_controls_on_screen() {
         grid_rect.width() > 300.0 && grid_rect.height() > 80.0,
         "{grid_rect:?}"
     );
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
     // Changing the status text in the narrow layout must not move/cancel the ruler.
+    ui.click("NOTE EDIT v");
     ui.click("Clear range");
     set_range(&mut ui, 2.0 / 3.0, 5.0 / 3.0);
     assert_range(&ui, 2.0 / 3.0, 5.0 / 3.0);
     ui.capture("piano-range-triplet-minimum-window");
+    ui.click("NOTE EDIT v");
     ui.click("Clear range");
     assert!(ui.app.piano_roll_state.repeat_range.is_none());
     assert!(ui.app.undo_stack.is_empty());

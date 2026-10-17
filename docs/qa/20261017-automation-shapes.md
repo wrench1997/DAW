@@ -81,3 +81,7 @@ Reproduction: source the tooling env, set
 `VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json` and absolute
 `CITRUS_UI_CAPTURE_DIR`, then run the no-default-features test binary with
 `automation_shapes_menu_applies_slipped_source_and_one_undo_redo --nocapture --test-threads=1`.
+
+## Compact Inspector follow-up
+
+The selected Automation clip now exposes SHAPES directly below its identity, before timing/envelope controls. A read-only “At playhead” value samples the selected source at source_offset + (song beat − clip start), with the lane’s interpolation and loop mapping. The placement interval is half-open; outside it the Inspector says “outside clip”. Disabled lanes are identified explicitly. Tempo uses BPM; other targets retain their native numeric scale. The number is a source-curve value, not a claim about final audible output, overlapping placements, Pattern-mode playback or runtime overrides. Existing shared-source warnings, shape options and one-step Undo/Redo are unchanged.

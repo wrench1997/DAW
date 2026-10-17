@@ -22,6 +22,8 @@ fn shape_ui() -> UiHarness {
         AutomationPoint::with_tension(8.0, 0.9, -0.3),
     ]);
     ui.app.sync_history_observer();
+    // The fixture represents a saved baseline, including the periodic dirty checker.
+    ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
     ui.app.undo_stack.clear();
     ui.app.redo_stack.clear();
     ui.app.dirty = false;
@@ -101,4 +103,178 @@ fn demo_automation_addresses_existing_keys_signal_and_honest_name() {
         project.clips.iter().find(|clip| clip.id == 9).unwrap().name,
         "Keys volume"
     );
+}
+
+#[test]
+fn automation_summary_shapes_and_curve_value_are_visible_and_read_only() {
+    let mut ui = shape_ui();
+    let clip = ui
+        .app
+        .project
+        .clips
+        .iter()
+        .find(|clip| clip.id == 9)
+        .unwrap()
+        .clone();
+    ui.app.beat_position = clip.start + 2.0;
+    ui.app.publish_transport_seek(f64::from(clip.start + 2.0));
+    ui.settle();
+    let before = project_fingerprint(&ui.app.project);
+    let shapes = ui.button("SHAPES").bounds().unwrap();
+    assert!(
+        shapes.y1 < 400.0,
+        "Shapes must be near the top without scrolling: {shapes:?}"
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|n| n.value())
+            .any(|s| s == "At playhead: 0.500 (curve)")
+    );
+    ui.capture("automation-top-summary");
+    ui.click("SHAPES");
+    for label in ["Rise", "Fall", "Eased rise", "Steps", "Sine", "Triangle"] {
+        let _ = ui.button(label);
+    }
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(!ui.app.dirty);
+    ui.app.project.automation_lanes[0].lane.set_enabled(false);
+    ui.app
+        .project
+        .clips
+        .iter_mut()
+        .find(|c| c.id == 9)
+        .unwrap()
+        .muted = true;
+    ui.settle();
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|n| n.value())
+            .any(|s| s == "Clip muted")
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|n| n.value())
+            .any(|s| s == "At playhead: automation disabled")
+    );
+}
+
+#[test]
+fn automation_curve_readout_maps_slipped_source_and_half_open_native_values() {
+    let ui = shape_ui();
+    let clip = ui
+        .app
+        .project
+        .clips
+        .iter()
+        .find(|clip| clip.id == 9)
+        .unwrap();
+    let lane = &ui.app.project.automation_lanes[0].lane;
+    assert_eq!(
+        automation_clip_value_readout(clip, lane, clip.start),
+        "At playhead: 0.300 (curve)"
+    );
+    assert_eq!(
+        automation_clip_value_readout(clip, lane, clip.start - 0.1),
+        "At playhead: outside clip"
+    );
+    assert_eq!(
+        automation_clip_value_readout(clip, lane, clip.start + clip.length),
+        "At playhead: outside clip"
+    );
+    assert_eq!(
+        automation_clip_value_readout(clip, lane, f32::NAN),
+        "At playhead: unavailable"
+    );
+    let mut tempo = AutomationLane::new(AutomationTarget::Tempo);
+    tempo.replace_points([
+        AutomationPoint::new(2.0, 100.0),
+        AutomationPoint::new(6.0, 140.0),
+    ]);
+    assert_eq!(
+        automation_clip_value_readout(clip, &tempo, clip.start + 2.0),
+        "At playhead: 120.00 BPM (curve)"
+    );
+    tempo.set_enabled(false);
+    assert_eq!(
+        automation_clip_value_readout(clip, &tempo, clip.start + 2.0),
+        "At playhead: automation disabled"
+    );
+}
+
+#[test]
+fn automation_curve_readout_respects_native_pan_loop_and_empty_lane() {
+    let ui = shape_ui();
+    let clip = ui
+        .app
+        .project
+        .clips
+        .iter()
+        .find(|clip| clip.id == 9)
+        .unwrap();
+    let mut lane = AutomationLane::new(AutomationTarget::MasterPan);
+    assert_eq!(
+        automation_clip_value_readout(clip, &lane, clip.start),
+        "At playhead: no points"
+    );
+    lane.replace_points([
+        AutomationPoint::new(2.0, -0.75),
+        AutomationPoint::new(6.0, 0.75),
+    ]);
+    assert_eq!(
+        automation_clip_value_readout(clip, &lane, clip.start),
+        "At playhead: -0.750 (curve)"
+    );
+    lane.set_loop_region(Some(
+        crate::automation::AutomationLoop::new(2.0, 4.0).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        automation_clip_value_readout(clip, &lane, clip.start + 2.0),
+        "At playhead: -0.750 (curve)"
+    );
+}
+
+#[test]
+fn automation_summary_shared_source_placements_read_their_own_offsets_without_history() {
+    let mut ui = shape_ui();
+    let mut second = ui
+        .app
+        .project
+        .clips
+        .iter()
+        .find(|clip| clip.id == 9)
+        .unwrap()
+        .clone();
+    second.id = 90_009;
+    second.start = 16.0;
+    second.source_offset = 0.0;
+    ui.app.project.clips.push(second);
+    ui.app.sync_history_observer();
+    // The fixture represents a saved baseline, including the periodic dirty checker.
+    ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
+    ui.app.undo_stack.clear();
+    ui.app.redo_stack.clear();
+    ui.app.dirty = false;
+    let before = project_fingerprint(&ui.app.project);
+    for (id, beat, expected) in [
+        (9, 8.0, "At playhead: 0.300 (curve)"),
+        (90_009, 16.0, "At playhead: 0.200 (curve)"),
+    ] {
+        ui.app.select_playlist_clip_only(id);
+        ui.app.beat_position = beat;
+        ui.app.publish_transport_seek(f64::from(beat));
+        ui.settle();
+        assert!(
+            ui.nodes.iter().any(|node| node.value() == Some(expected)),
+            "Selected placement {id} must use its own source offset"
+        );
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert!(ui.app.undo_stack.is_empty() && ui.app.redo_stack.is_empty());
+        assert!(!ui.app.dirty);
+    }
 }

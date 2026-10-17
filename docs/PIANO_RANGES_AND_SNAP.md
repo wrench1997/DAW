@@ -54,12 +54,12 @@ inside a Project, preferences, or Undo. A held ruler gesture cancels and restore
 opening range/selection on focus, modal, hidden editor, Channel, owner, viewport
 or geometry interruption. It cannot resume until the pointer is released.
 
-## Narrow Piano windows
+## Compact Piano toolbar
 
-Below 640 logical pixels of editor width, **NOTE EDIT** contains the clipboard,
+At every editor width, **NOTE EDIT** contains the clipboard,
 range and selected-note Channel commands; **SCALE / CHORD** contains those setup
 controls. All actions retain their keyboard shortcuts. TARGET, local snap and a
-short range/paste summary remain visible. This preserves the 480×420 minimum and
+short range summary remain visible. Wider editors also show the paste anchor; it remains available in NOTE EDIT at narrow widths. This preserves the 480×420 minimum and
 the user's zoom while keeping the note canvas and velocity lane usable. Opening
 menus retains the same focus, snapshot and held-pointer barriers; explicit menu
 commands use their own allowed popup path.
@@ -167,3 +167,5 @@ popup pixels were inspected. The narrow menu retains the editable note/velocity
 canvas and established ownership/history guards. New Windows execution remains
 a separate checkpoint; the prior native paint failure is not waived by these
 source or offscreen results.
+
+The compact toolbar keeps tools, time snap, active Channel, ghost notes and Fit Notes directly accessible. Scale/chord setup and zoom sliders use named menus; an enabled scale lock and the active Stamp chord remain visible in the closed menu label. Narrow windows wrap the same controls rather than switching to a different command layout.

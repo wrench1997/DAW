@@ -1912,6 +1912,7 @@ fn piano_clipboard_buttons_cut_empty_invalid_text_and_local_paste_are_deliberate
     ui.run(vec![egui::Event::Paste("unrelated external text".into())]);
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert!(ui.app.undo_stack.is_empty());
+    ui.click("NOTE EDIT v");
     ui.click("Select all notes");
     assert_eq!(ui.app.piano_roll_state.selection_ids.len(), 2);
     let text = copied_note_text(&ui.run(vec![
@@ -1938,6 +1939,7 @@ fn piano_clipboard_buttons_cut_empty_invalid_text_and_local_paste_are_deliberate
     assert_eq!(project_fingerprint(&ui.app.project), before);
     ui.key(egui::Key::Y, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), cut);
+    ui.click("NOTE EDIT v");
     ui.click("Paste notes");
     assert_eq!(
         ui.app.project.active_pattern().notes.len(),
@@ -2124,6 +2126,7 @@ fn piano_clipboard_reset_invalid_channel_and_snapshot_barriers_preserve_history(
     ui.key(egui::Key::V, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), new_project);
     assert!(ui.app.undo_stack.is_empty());
+    ui.click("NOTE EDIT v");
     assert!(ui.button("Paste notes").is_disabled());
 }
 
@@ -2226,10 +2229,12 @@ fn piano_clipboard_numeric_text_focus_keeps_normal_text_clipboard_ownership() {
 fn piano_clipboard_copy_cut_buttons_emit_one_payload_and_cut_is_one_undo() {
     let mut ui = UiHarness::floating();
     piano_clipboard_fixture(&mut ui);
+    ui.click("NOTE EDIT v");
     ui.click("Select all notes");
     let before = project_fingerprint(&ui.app.project);
     let mut payloads = Vec::new();
     for label in ["Copy notes", "Cut notes"] {
+        ui.click("NOTE EDIT v");
         ui.settle();
         let bounds = ui.button(label).bounds().unwrap();
         let pos = Pos2::new(

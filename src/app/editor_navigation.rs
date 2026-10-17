@@ -110,6 +110,19 @@ pub(super) fn wheel(ui: &egui::Ui, viewport: &mut Viewport2D, canvas: Rect, owne
 }
 
 impl CitrusApp {
+    pub(super) fn fit_active_piano_notes(&mut self) {
+        let active_channel = self
+            .project
+            .channels
+            .get(self.selected_channel)
+            .map(|channel| channel.id);
+        fit_piano_notes(
+            &mut self.piano_viewport,
+            &self.project.active_pattern().notes,
+            active_channel,
+        );
+    }
+
     pub(super) fn piano_view_controls(&mut self, ui: &mut egui::Ui) {
         let mut horizontal = self.piano_viewport.x.pixels_per_unit() as f32;
         let mut vertical = self.piano_viewport.y.pixels_per_unit() as f32;
@@ -149,21 +162,6 @@ impl CitrusApp {
                         let anchor = self.piano_viewport.y.viewport_pixels() * 0.5;
                         let factor = f64::from(vertical) / self.piano_viewport.y.pixels_per_unit();
                         let _ = self.piano_viewport.y.zoom_at_pixel(anchor, factor);
-                    }
-                    if ui
-                        .studio_button(RichText::new("FIT NOTES").size(8.0))
-                        .clicked()
-                    {
-                        let active_channel = self
-                            .project
-                            .channels
-                            .get(self.selected_channel)
-                            .map(|c| c.id);
-                        fit_piano_notes(
-                            &mut self.piano_viewport,
-                            &self.project.active_pattern().notes,
-                            active_channel,
-                        );
                     }
                 });
             });

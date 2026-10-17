@@ -148,8 +148,8 @@ def log(kind, **fields):
     ledger.write(json.dumps(dict(pid=os.getpid(), kind=kind, **fields)) + '\n')
 def unchanged():
     return (root / 'render.wav').read_bytes() == b'unchanged destination'
-def exiting():
-    log('exit', destination_unchanged=unchanged())
+def exiting(evidence='atexit_handler'):
+    log('exit', destination_unchanged=unchanged(), evidence=evidence)
 atexit.register(exiting)
 log('spawn', destination_unchanged=unchanged())
 def reply(value):
@@ -488,7 +488,19 @@ while True:
             sys.stdout = open(os.devnull, 'w')
         else:
             log('late_snapshot_written', stage=stage)
-        break
+        # This synthetic child owns no plugin. Do not make the protocol test
+        # depend on Python finalization inside the unchanged 100 ms terminal
+        # cleanup window. This marker is exit intent, never proof of OS exit.
+        log('late_protocol_complete', stage=stage)
+        if cfg.get('late_exit_mode') == 'blocked_finalizer':
+            def blocked_finalizer():
+                log('late_finalizer_blocked', stage=stage)
+                time.sleep(30)
+            atexit.register(blocked_finalizer)
+            break
+        exiting('protocol_complete_exit_intent')
+        ledger.flush()
+        os._exit(0)
     reply(response)
     log('reply', stage=stage)
     if cfg['fault'] == 'block_stdin' and stage == 'ResetOriginSupport:1':
@@ -3222,7 +3234,9 @@ fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_
         if cancel {
             assert!(job.control.export.clone().cancel());
         }
-        let failure = failed(job.finish());
+        let outcome = job.finish();
+        report_late_bundle_terminal(&mock, cancel, &outcome);
+        let failure = failed(outcome);
         if !cancel {
             assert!(Instant::now() >= job.control.deadline);
         }
@@ -3284,7 +3298,10 @@ fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_
         }
         let exited = ledger.iter().position(|row| row["kind"] == "exit").unwrap();
         assert!(complete < write_position && write_position < exited);
-        assert!(mock.audit().iter().any(concrete_child_reap_evidence));
+        assert_eq!(ledger[exited]["evidence"], "protocol_complete_exit_intent");
+        // The marker above is only intent. A completed successful OS reap with
+        // no forced-termination/cleanup error is the independent exit proof.
+        assert!(mock.audit().iter().any(clean_child_reap_evidence));
         assert!(
             !mock
                 .commands()
@@ -3295,6 +3312,85 @@ fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_
         assert_eq!(selected_source_project_snapshot(&project), original);
         assert_eq!(capture.state, state);
     }
+}
+
+// Historical Windows failure retained no audit artifact, so its exact cause is
+// unknown. Always print completed-attempt evidence before assertions; a later
+// failure must distinguish forced termination from a missing fixture marker.
+fn report_late_bundle_terminal(mock: &Mock, cancel: bool, outcome: &RenderOutcome) {
+    eprintln!(
+        "late-bundle-terminal {}",
+        json!({"cancel":cancel,
+            "outcome":blocked_stage_outcome("blocked", "LatencySamples:1", true, outcome),
+            "ledger":mock.ledger(), "audit":mock.audit()})
+    );
+}
+
+fn clean_child_reap_evidence(disposal: &Value) -> bool {
+    concrete_child_reap_evidence(disposal)
+        && disposal["error"].is_null()
+        && disposal["diagnostics"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+}
+
+#[test]
+fn strict_selected_bundle_blocked_finalizer_requires_forced_reap_without_publish() {
+    let _serial = serial();
+    let mock = Mock::new("late_after_eof", "LatencySamples:1").with_selected_stereo();
+    let path = mock.root.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["late_exit_mode"] = json!("blocked_finalizer");
+    fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let (project, capture) = mock.capture();
+    let original = selected_source_project_snapshot(&project);
+    let state = capture.state.clone();
+    let job = Job::start(&mock, Hook::None, Duration::from_secs(20));
+    mock.wait_stage("blocked", "LatencySamples:1");
+    assert!(job.control.export.clone().cancel());
+    let outcome = job.finish();
+    report_late_bundle_terminal(&mock, true, &outcome);
+    let failure = failed(outcome);
+    assert_typed(
+        &failure,
+        StrictKind::Cancelled,
+        BackendDelivery::MayHaveApplied,
+    );
+    assert_exchange_context(
+        &failure,
+        "prepare.final_metadata.bundle",
+        "StrictMetadataSnapshot",
+    );
+    let ledger = mock.ledger();
+    let complete = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_protocol_complete")
+        .unwrap();
+    let blocked = ledger
+        .iter()
+        .position(|row| row["kind"] == "late_finalizer_blocked")
+        .unwrap();
+    assert!(complete < blocked);
+    assert!(!ledger.iter().any(|row| row["kind"] == "exit"));
+    let audit = mock.audit();
+    assert!(audit.iter().any(concrete_child_reap_evidence));
+    assert!(!audit.iter().any(clean_child_reap_evidence));
+    assert!(audit.iter().any(|row| concrete_child_reap_evidence(row)
+        && row["diagnostics"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item == "Strict clone required forced termination")
+        })));
+    assert!(failure.cleanup_backend.is_some());
+    assert!(
+        !mock
+            .commands()
+            .iter()
+            .any(|row| row.starts_with("Process:") || row.starts_with("SendMidiAt:"))
+    );
+    mock.assert_terminal_at("StrictMetadataSnapshot:1");
+    assert_eq!(selected_source_project_snapshot(&project), original);
+    assert_eq!(capture.state, state);
 }
 
 fn progress_scenario(mock: &Mock, scenario: &str) {

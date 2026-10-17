@@ -224,3 +224,102 @@ fn piano_range_actual_minimum_floating_window_has_usable_grid_and_controls() {
     ui.key(egui::Key::Escape, egui::Modifiers::NONE);
     assert_eq!(project_fingerprint(&ui.app.project), project);
 }
+
+#[test]
+fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    for (width, capture) in [
+        (1100.0, "piano-compact-wide"),
+        (650.0, "piano-compact-650"),
+        (630.0, "piano-compact-630"),
+    ] {
+        ui.arrange_test_windows(
+            &[(
+                StudioView::PianoRoll,
+                Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(width, 600.0)),
+            )],
+            StudioView::PianoRoll,
+        );
+        ui.settle();
+        let before = project_fingerprint(&ui.app.project);
+        let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+        let window = ui.editor_rect(StudioView::PianoRoll);
+        assert!(
+            grid.height() >= 260.0,
+            "compact controls leave room for the melody: {grid:?}"
+        );
+        assert!(window.contains_rect(grid));
+        for label in [
+            "NOTE EDIT v",
+            "SCALE / CHORD v",
+            "VIEW v",
+            "FIT NOTES",
+            "GHOST NOTES",
+        ] {
+            let _ = ui.button(label);
+        }
+        assert!(!ui.nodes.iter().any(|n| n.label() == Some("Copy notes")));
+        ui.capture(capture);
+        ui.click("NOTE EDIT v");
+        for label in [
+            "Copy notes",
+            "Cut notes",
+            "Paste notes",
+            "Range from selection",
+            "Clear range",
+        ] {
+            let _ = ui.button(label);
+        }
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert!(ui.app.undo_stack.is_empty());
+    }
+    ui.app.piano_roll_state.snap_to_scale = true;
+    ui.app.piano_roll_state.tool = PianoRollTool::Stamp;
+    ui.settle();
+    let label = ui
+        .nodes
+        .iter()
+        .filter_map(|n| n.label())
+        .find(|label| label.starts_with("SCALE / CHORD v ·"))
+        .unwrap();
+    assert!(label.contains("LOCK"));
+    assert!(label.contains(ui.app.piano_roll_state.chord_stamp.label()));
+    ui.capture("piano-compact-scale-lock-stamp");
+    ui.app.piano_roll_state.scale = PianoScale::ALL
+        .into_iter()
+        .max_by_key(|scale| scale.label().len())
+        .unwrap();
+    ui.app.piano_roll_state.chord_stamp = PianoChordStamp::ALL
+        .into_iter()
+        .max_by_key(|chord| chord.label().len())
+        .unwrap();
+    ui.arrange_test_windows(
+        &[(
+            StudioView::PianoRoll,
+            Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(480.0, 420.0)),
+        )],
+        StudioView::PianoRoll,
+    );
+    ui.settle();
+    let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+    let window = ui.editor_rect(StudioView::PianoRoll);
+    assert!(
+        grid.height() >= 144.0 && window.contains_rect(grid),
+        "Longest scale/chord settings retain the minimum grid: {grid:?}"
+    );
+    for node in &ui.nodes {
+        if node
+            .label()
+            .is_some_and(|label| label.starts_with("SCALE / CHORD v"))
+        {
+            let b = node.bounds().unwrap();
+            assert!(window.contains_rect(Rect::from_min_max(
+                Pos2::new(b.x0 as f32, b.y0 as f32),
+                Pos2::new(b.x1 as f32, b.y1 as f32)
+            )));
+        }
+    }
+    ui.capture("piano-compact-longest-lock-stamp-480");
+}
