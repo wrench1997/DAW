@@ -69,13 +69,13 @@ mod stream_instances_tests;
     feature = "experimental-fresh-helper"
 ))]
 mod stream_live;
+#[cfg(all(windows, feature = "experimental-fresh-helper"))]
+pub(crate) use stream_live::StreamFinishPoll;
 #[cfg(all(
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
 ))]
-pub(crate) use stream_live::{
-    StreamError, StreamFinishPoll, StreamRecoveryHandle, StreamRetirement,
-};
+pub(crate) use stream_live::{StreamError, StreamRecoveryHandle, StreamRetirement};
 #[cfg(all(
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
@@ -86,10 +86,7 @@ mod stream_export_audit;
     feature = "experimental-fresh-helper"
 ))]
 mod stream_replay;
-#[cfg(all(
-    any(target_os = "linux", windows),
-    feature = "experimental-fresh-helper"
-))]
+#[cfg(all(windows, feature = "experimental-fresh-helper"))]
 pub(crate) use stream_export_audit::StreamReplayEvidence;
 #[cfg(all(
     any(target_os = "linux", windows),

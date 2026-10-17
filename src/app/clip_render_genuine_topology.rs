@@ -1115,6 +1115,7 @@ pub(crate) fn claim_from_app(
             };
             let stamp = job.removal.ok_or("queued conversion has no exact stamp")?;
             let binding = job
+                .stopped
                 .binding
                 .ok_or("queued conversion has no sealed live binding")?;
             require(

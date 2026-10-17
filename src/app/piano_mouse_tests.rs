@@ -1091,3 +1091,374 @@ fn piano_mouse_batched_overlap_uses_topmost_note_not_an_underlying_resize_grip()
     assert_eq!(ui.app.project.active_pattern().notes.len(), 3);
     assert_eq!(ui.app.undo_stack.len(), 1);
 }
+
+// These regressions exercise egui's real widget ownership, not only rectangles.
+fn short_note_fixture(length: f32) -> UiHarness {
+    let mut ui = fixture();
+    ui.app.piano_roll_state.grouping_enabled = false;
+    ui.app.piano_roll_state.clear_selection();
+    ui.app.project.active_pattern_mut().notes[0].length = length;
+    ui.app.sync_history_observer();
+    ui.settle();
+    ui
+}
+
+fn grip(ui: &UiHarness, id: u64) -> Rect {
+    ui.ctx
+        .read_response(Id::new(("piano-note", id)).with("resize"))
+        .unwrap()
+        .rect
+}
+
+fn batched_drag(ui: &mut UiHarness, from: Pos2, to: Pos2) {
+    ui.run(vec![
+        egui::Event::PointerMoved(from),
+        egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::PointerMoved(to),
+        egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    ui.settle();
+}
+
+#[test]
+fn piano_mouse_short_and_normal_body_move_and_edge_resize_are_distinct() {
+    for length in [0.125, 0.75] {
+        for batched in [false, true] {
+            for resize in [false, true] {
+                let mut ui = short_note_fixture(length);
+                let original = project_fingerprint(&ui.app.project);
+                let start = note(&ui, 90001).start;
+                let body_rect = ui
+                    .ctx
+                    .read_response(Id::new(("piano-note", 90001_u64)))
+                    .unwrap()
+                    .rect;
+                let edge = grip(&ui, 90001);
+                assert!(body_rect.width() >= 3.0);
+                assert!(body_rect.right() <= edge.left());
+                let from = if resize {
+                    edge.center()
+                } else {
+                    body_rect.center()
+                };
+                let to = from + Vec2::new(60.0, 0.0);
+                if batched {
+                    batched_drag(&mut ui, from, to);
+                } else {
+                    drag(
+                        &mut ui,
+                        from,
+                        to,
+                        egui::Modifiers::NONE,
+                        egui::Modifiers::NONE,
+                    );
+                }
+                if resize {
+                    assert_eq!(note(&ui, 90001).start, start);
+                    assert!(note(&ui, 90001).length > length);
+                } else {
+                    assert!(
+                        note(&ui, 90001).start > start,
+                        "length {length}, batched {batched}"
+                    );
+                    assert_eq!(note(&ui, 90001).length, length);
+                }
+                assert_eq!(ui.app.project.active_pattern().notes.len(), 3);
+                assert_eq!(ui.app.undo_stack.len(), 1);
+                ui.key(egui::Key::Z, piano_clipboard_command());
+                assert_eq!(project_fingerprint(&ui.app.project), original);
+            }
+        }
+    }
+}
+
+#[test]
+fn piano_mouse_secondary_delete_works_on_short_and_normal_body_and_handle() {
+    for length in [0.125, 0.75] {
+        for handle in [false, true] {
+            let mut ui = short_note_fixture(length);
+            let original = project_fingerprint(&ui.app.project);
+            let p = if handle {
+                grip(&ui, 90001).center()
+            } else {
+                body(&ui, 90001)
+            };
+            for pressed in [true, false] {
+                ui.run(vec![
+                    egui::Event::PointerMoved(p),
+                    egui::Event::PointerButton {
+                        pos: p,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            ui.settle();
+            assert!(
+                !ui.app
+                    .project
+                    .active_pattern()
+                    .notes
+                    .iter()
+                    .any(|n| n.id == 90001),
+                "length {length}, handle {handle}"
+            );
+            assert_eq!(ui.app.undo_stack.len(), 1);
+            ui.key(egui::Key::Z, piano_clipboard_command());
+            assert_eq!(project_fingerprint(&ui.app.project), original);
+        }
+    }
+}
+
+#[test]
+fn piano_mouse_handle_respects_delete_mute_and_slice_tools() {
+    for tool in [
+        PianoRollTool::Delete,
+        PianoRollTool::Mute,
+        PianoRollTool::Slice,
+    ] {
+        let mut ui = short_note_fixture(0.75);
+        ui.app.piano_roll_state.tool = tool;
+        ui.app.piano_roll_state.local_snap = PianoSnap::Off;
+        ui.settle();
+        let original = project_fingerprint(&ui.app.project);
+        let edge = grip(&ui, 90001);
+        // Inside the painted end, so Slice has a valid nonzero right fragment.
+        let p = Pos2::new(edge.left() + 1.0, edge.center().y);
+        click(&mut ui, p, egui::Modifiers::NONE);
+        match tool {
+            PianoRollTool::Delete => assert!(
+                !ui.app
+                    .project
+                    .active_pattern()
+                    .notes
+                    .iter()
+                    .any(|n| n.id == 90001)
+            ),
+            PianoRollTool::Mute => {
+                assert!(note(&ui, 90001).muted);
+                assert_eq!(note(&ui, 90001).length, 0.75);
+            }
+            PianoRollTool::Slice => {
+                assert_eq!(ui.app.project.active_pattern().notes.len(), 4);
+                assert!(note(&ui, 90001).length < 0.75);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(ui.app.undo_stack.len(), 1);
+        ui.key(egui::Key::Z, piano_clipboard_command());
+        assert_eq!(project_fingerprint(&ui.app.project), original);
+    }
+}
+
+#[test]
+fn piano_mouse_short_body_focus_loss_cannot_resume_or_resize() {
+    let mut ui = short_note_fixture(0.125);
+    let original = project_fingerprint(&ui.app.project);
+    let from = body(&ui, 90001);
+    mouse(&mut ui, from, Some(true), egui::Modifiers::NONE);
+    mouse(
+        &mut ui,
+        from + Vec2::new(60.0, 0.0),
+        None,
+        egui::Modifiers::NONE,
+    );
+    let preview = project_fingerprint(&ui.app.project);
+    assert_eq!(note(&ui, 90001).length, 0.125);
+    ui.time += 0.1;
+    let _ = ui.ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, ui.size)),
+            time: Some(ui.time),
+            focused: false,
+            events: vec![egui::Event::WindowFocused(false)],
+            ..Default::default()
+        },
+        |root| ui.app.ui(root, &mut ui.frame),
+    );
+    ui.run(vec![egui::Event::WindowFocused(true)]);
+    mouse(
+        &mut ui,
+        from + Vec2::new(130.0, -24.0),
+        Some(false),
+        egui::Modifiers::NONE,
+    );
+    ui.settle();
+    assert_eq!(project_fingerprint(&ui.app.project), preview);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+}
+
+#[test]
+fn piano_mouse_erase_drag_from_note_or_blank_is_one_transaction() {
+    for start_on_note in [false, true] {
+        for batched in [false, true] {
+            let mut ui = short_note_fixture(0.125);
+            ui.app.piano_roll_state.tool = PianoRollTool::Delete;
+            ui.settle();
+            let original = project_fingerprint(&ui.app.project);
+            let a = body(&ui, 90001);
+            let b = body(&ui, 90002);
+            let from = if start_on_note {
+                a
+            } else {
+                point(&ui, 0.1, 65)
+            };
+            if batched {
+                ui.run(vec![
+                    egui::Event::PointerMoved(from),
+                    egui::Event::PointerButton {
+                        pos: from,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerMoved(a),
+                    egui::Event::PointerMoved(b),
+                    egui::Event::PointerButton {
+                        pos: b,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            } else {
+                mouse(&mut ui, from, Some(true), egui::Modifiers::NONE);
+                mouse(&mut ui, a, None, egui::Modifiers::NONE);
+                mouse(&mut ui, b, None, egui::Modifiers::NONE);
+                mouse(&mut ui, b, Some(false), egui::Modifiers::NONE);
+            }
+            ui.settle();
+            assert!(
+                !ui.app
+                    .project
+                    .active_pattern()
+                    .notes
+                    .iter()
+                    .any(|n| n.id == 90001 || n.id == 90002),
+                "on note {start_on_note}, batched {batched}"
+            );
+            assert_eq!(ui.app.undo_stack.len(), 1);
+            ui.key(egui::Key::Z, piano_clipboard_command());
+            assert_eq!(project_fingerprint(&ui.app.project), original);
+        }
+    }
+}
+
+#[test]
+fn piano_mouse_short_overlap_keeps_topmost_ownership() {
+    for batched in [false, true] {
+        for erase in [false, true] {
+            let mut ui = short_note_fixture(0.125);
+            let notes = &mut ui.app.project.active_pattern_mut().notes;
+            notes[1].start = notes[0].start;
+            notes[1].note = notes[0].note;
+            notes[1].length = 0.125;
+            if erase {
+                ui.app.piano_roll_state.tool = PianoRollTool::Delete;
+            }
+            ui.app.sync_history_observer();
+            ui.settle();
+            let original = project_fingerprint(&ui.app.project);
+            let from = body(&ui, 90002);
+            let to = if erase {
+                from
+            } else {
+                from + Vec2::new(60.0, 0.0)
+            };
+            if batched {
+                batched_drag(&mut ui, from, to);
+            } else {
+                drag(
+                    &mut ui,
+                    from,
+                    to,
+                    egui::Modifiers::NONE,
+                    egui::Modifiers::NONE,
+                );
+            }
+            assert_eq!(
+                (note(&ui, 90001).start, note(&ui, 90001).length),
+                (0.375, 0.125)
+            );
+            if erase {
+                assert!(
+                    !ui.app
+                        .project
+                        .active_pattern()
+                        .notes
+                        .iter()
+                        .any(|n| n.id == 90002)
+                );
+            } else {
+                assert!(note(&ui, 90002).start > 0.375);
+                assert_eq!(note(&ui, 90002).length, 0.125);
+            }
+            assert_eq!(ui.app.undo_stack.len(), 1);
+            ui.key(egui::Key::Z, piano_clipboard_command());
+            assert_eq!(project_fingerprint(&ui.app.project), original);
+        }
+    }
+}
+
+#[test]
+fn piano_mouse_minimum_zoom_culled_note_cannot_steal_or_erase_blank_edge() {
+    for tool in [PianoRollTool::Delete, PianoRollTool::Draw] {
+        for batched in [false, true] {
+            let mut ui = short_note_fixture(0.125);
+            ui.app.piano_roll_state.tool = tool;
+            let notes = &mut ui.app.project.active_pattern_mut().notes;
+            notes[0].start = 126.0;
+            // Keep enough scrollable content at minimum zoom.
+            notes[2].start = 4000.0;
+            ui.app.sync_history_observer();
+            ui.settle();
+            ui.app
+                .piano_viewport
+                .x
+                .zoom_at_pixel(0.0, 1.0 / 60.0)
+                .unwrap();
+            ui.app.piano_viewport.x.scroll_by_pixels(128.0).unwrap();
+            ui.settle();
+            assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 1.0);
+            assert_eq!(ui.app.piano_viewport.x.origin(), 128.0);
+            let original = project_fingerprint(&ui.app.project);
+            let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+            let (_, _, body_rect, edge) =
+                piano_mouse::note_rects(grid, ui.app.piano_viewport, note(&ui, 90001));
+            let from = Pos2::new(grid.left() + 1.0, body_rect.center().y);
+            assert!(
+                body_rect.contains(from) || edge.contains(from),
+                "the synthetic minimum-width hit box reaches into the grid"
+            );
+            if batched {
+                batched_drag(&mut ui, from, from);
+            } else {
+                click(&mut ui, from, egui::Modifiers::NONE);
+            }
+            assert_eq!(
+                (note(&ui, 90001).start, note(&ui, 90001).length),
+                (126.0, 0.125)
+            );
+            if tool == PianoRollTool::Delete {
+                assert_eq!(project_fingerprint(&ui.app.project), original);
+                assert!(ui.app.undo_stack.is_empty());
+            } else {
+                assert_eq!(ui.app.project.active_pattern().notes.len(), 4);
+                assert_eq!(ui.app.undo_stack.len(), 1);
+            }
+        }
+    }
+}

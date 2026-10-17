@@ -453,10 +453,12 @@ fn capture_callback_entry_revokes_before_commands_and_admission_fault_stays_inva
         .finish_bounce_source_callback(&fixture.callback.transport, true);
     fixture.assert_waiting();
     fixture.republish_after_read_only_check();
-    assert_eq!(
-        fixture.control.bounce_source_settlement(fixture.target),
-        BounceSourceSettlement::Ready
-    );
+    // The callback publication is restored, but independent worker/admin work
+    // may transiently prevent a coherent Ready observation. Observe only;
+    // another callback or publication must not repair this boundary.
+    wait_until(|| {
+        fixture.control.bounce_source_settlement(fixture.target) == BounceSourceSettlement::Ready
+    });
     // Force the real admission early return without modifying any shared publication.
     fixture.callback.dsp.plugin_timing.callback_budget_frames = 1;
     fixture

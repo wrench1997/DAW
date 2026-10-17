@@ -154,32 +154,16 @@ impl CitrusApp {
                         .studio_button(RichText::new("FIT NOTES").size(8.0))
                         .clicked()
                     {
-                        let notes = &self.project.active_pattern().notes;
                         let active_channel = self
                             .project
                             .channels
                             .get(self.selected_channel)
                             .map(|c| c.id);
-                        let targets: Vec<_> = notes
-                            .iter()
-                            .filter(|n| n.channel_id == active_channel)
-                            .collect();
-                        let end = targets
-                            .iter()
-                            .map(|n| f64::from(n.start + n.length))
-                            .fold(4.0, f64::max);
-                        fit_axis(&mut self.piano_viewport.x, 0.0, end, 12.0);
-                        if let (Some(high), Some(low)) = (
-                            targets.iter().map(|n| n.note).max(),
-                            targets.iter().map(|n| n.note).min(),
-                        ) {
-                            fit_axis(
-                                &mut self.piano_viewport.y,
-                                piano_pitch_row(high) - 1.0,
-                                piano_pitch_row(low) + 2.0,
-                                8.0,
-                            );
-                        }
+                        fit_piano_notes(
+                            &mut self.piano_viewport,
+                            &self.project.active_pattern().notes,
+                            active_channel,
+                        );
                     }
                 });
             });
@@ -215,4 +199,164 @@ fn fit_axis(axis: &mut AxisViewport, start: f64, end: f64, margin: f64) {
     let factor = pixels / (end - start).max(1.0) / axis.pixels_per_unit();
     let _ = axis.zoom_at_pixel(0.0, factor);
     let _ = axis.reveal(start, end, margin);
+}
+
+/// Fit only the editable channel, never ghost notes. Keeping this operation's
+/// mutable input limited to the viewport also keeps it out of project history.
+fn fit_piano_notes(viewport: &mut Viewport2D, notes: &[PianoNote], channel: Option<u32>) {
+    let targets: Vec<_> = notes
+        .iter()
+        .filter(|note| note.channel_id == channel)
+        .collect();
+    let bounds = targets.iter().fold(None, |bounds, note| {
+        let start = f64::from(note.start);
+        let end = start + f64::from(note.length);
+        Some(match bounds {
+            Some((first, last)) => (f64::min(first, start), f64::max(last, end)),
+            None => (start, end),
+        })
+    });
+    // Empty channels retain the useful first-bar view. A populated channel
+    // frames its phrase even when it begins many bars into the pattern.
+    let (start, end) = bounds.unwrap_or((0.0, 4.0));
+    fit_axis(&mut viewport.x, start, end, 12.0);
+    if let (Some(high), Some(low)) = (
+        targets.iter().map(|note| note.note).max(),
+        targets.iter().map(|note| note.note).min(),
+    ) {
+        fit_axis(
+            &mut viewport.y,
+            piano_pitch_row(high) - 1.0,
+            piano_pitch_row(low) + 2.0,
+            8.0,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(channel: Option<u32>, start: f32, length: f32, pitch: u8) -> PianoNote {
+        PianoNote {
+            id: 1,
+            channel_id: channel,
+            group_id: None,
+            note: pitch,
+            start,
+            length,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        }
+    }
+
+    fn viewport() -> Viewport2D {
+        let mut viewport = default_piano_viewport();
+        viewport.x.set_content_range(0.0, 8192.0).unwrap();
+        viewport.x.set_viewport_pixels(720.0).unwrap();
+        viewport
+    }
+
+    fn assert_visible(axis: AxisViewport, start: f64, end: f64) {
+        let (left, right) = axis.visible_range();
+        assert!(left <= start + 1.0e-9, "{left} > {start}");
+        assert!(right >= end - 1.0e-9, "{right} < {end}");
+    }
+
+    #[test]
+    fn fit_notes_frames_late_phrase_instead_of_leading_silence() {
+        let mut viewport = viewport();
+        let notes = [note(Some(7), 128.0, 1.0, 60), note(Some(7), 131.0, 1.0, 67)];
+        fit_piano_notes(&mut viewport, &notes, Some(7));
+        assert_visible(viewport.x, 128.0, 132.0);
+        assert!((viewport.x.pixels_per_unit() - 174.0).abs() < 1.0e-9);
+        assert!((viewport.x.pixel_for_content(128.0) - 12.0).abs() < 1.0e-9);
+        assert!((viewport.x.pixel_for_content(132.0) - 708.0).abs() < 1.0e-9);
+        assert_visible(viewport.y, piano_pitch_row(67), piano_pitch_row(60) + 1.0);
+        let fitted = viewport;
+        fit_piano_notes(&mut viewport, &notes, Some(7));
+        assert_eq!(viewport, fitted, "repeated fitting should be stable");
+    }
+
+    #[test]
+    fn fit_notes_empty_pattern_returns_to_first_bar_without_changing_pitch() {
+        let mut viewport = viewport();
+        viewport.x.set_normalized_scroll(1.0).unwrap();
+        let pitch_before = viewport.y;
+        fit_piano_notes(&mut viewport, &[], Some(7));
+        assert_visible(viewport.x, 0.0, 4.0);
+        assert_eq!(viewport.x.origin(), 0.0);
+        assert_eq!(viewport.y, pitch_before);
+    }
+
+    #[test]
+    fn fit_notes_single_short_note_respects_maximum_zoom() {
+        let mut viewport = viewport();
+        fit_piano_notes(&mut viewport, &[note(Some(7), 128.0, 0.25, 60)], Some(7));
+        assert_visible(viewport.x, 128.0, 128.25);
+        assert_eq!(viewport.x.pixels_per_unit(), 512.0);
+        assert_eq!(viewport.y.pixels_per_unit(), 96.0);
+    }
+
+    #[test]
+    fn fit_notes_long_note_includes_its_full_tail() {
+        let mut viewport = viewport();
+        fit_piano_notes(&mut viewport, &[note(Some(7), 128.0, 256.0, 60)], Some(7));
+        assert_visible(viewport.x, 128.0, 384.0);
+        assert!((viewport.x.pixels_per_unit() - 696.0 / 256.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn fit_notes_oversized_phrase_respects_minimum_zoom_and_reveals_start() {
+        let mut viewport = viewport();
+        fit_piano_notes(&mut viewport, &[note(Some(7), 128.0, 4096.0, 60)], Some(7));
+        assert_eq!(viewport.x.pixels_per_unit(), 1.0);
+        assert!((viewport.x.pixel_for_content(128.0) - 12.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn fit_notes_ignores_other_channels_and_unassigned_ghost_notes() {
+        let notes = [
+            note(Some(7), 128.0, 4.0, 60),
+            note(Some(8), 0.0, 4096.0, 127),
+            note(None, 4096.0, 8.0, 0),
+        ];
+        let mut actual = viewport();
+        let mut expected = actual;
+        fit_piano_notes(&mut expected, &notes[..1], Some(7));
+        fit_piano_notes(&mut actual, &notes, Some(7));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fit_notes_empty_selected_channel_does_not_fit_ghosts() {
+        let mut actual = viewport();
+        let mut expected = actual;
+        fit_piano_notes(&mut expected, &[], Some(7));
+        fit_piano_notes(&mut actual, &[note(Some(8), 128.0, 4.0, 127)], Some(7));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fit_notes_unassigned_target_preserves_existing_channel_matching() {
+        let notes = [note(None, 128.0, 4.0, 60), note(Some(8), 0.0, 4096.0, 127)];
+        let mut actual = viewport();
+        let mut expected = actual;
+        fit_piano_notes(&mut expected, &notes[..1], None);
+        fit_piano_notes(&mut actual, &notes, None);
+        assert_eq!(actual, expected);
+        assert_visible(actual.x, 128.0, 132.0);
+    }
+
+    #[test]
+    fn fit_notes_at_time_and_pitch_edges_stays_in_content_bounds() {
+        let mut viewport = viewport();
+        let notes = [note(Some(7), 0.0, 1.0, 0), note(Some(7), 3.0, 1.0, 127)];
+        fit_piano_notes(&mut viewport, &notes, Some(7));
+        assert_eq!(viewport.x.origin(), 0.0);
+        assert_visible(viewport.x, 0.0, 4.0);
+        assert_eq!(viewport.y.origin(), 0.0);
+        assert_eq!(viewport.y.pixels_per_unit(), 8.0);
+    }
 }

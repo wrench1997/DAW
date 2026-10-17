@@ -207,8 +207,14 @@ fn loop_restart_missing_prepared_identity_at_wrap_stays_stopped_after_commands_s
     let status = Arc::clone(&f.engine.as_ref().unwrap().status);
     let mailbox = Arc::clone(&f.engine.as_ref().unwrap().transport_mailbox);
     let callback = f.callback_mut();
-    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
-        callback.transport.apply_latest_request(&mailbox, &status, &mut callback.dsp);
+    // Worker-only admin work may become busy after the token observation.
+    // The callback deliberately defers the same prepared request in that case;
+    // retry that production admission without rendering or advancing the loop.
+    wait_until(|| {
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            callback.transport.apply_latest_request(&mailbox, &status, &mut callback.dsp);
+        });
+        callback.transport.request.playing
     });
     assert!(f.callback().transport.request.playing);
     let controller = f.engine.as_mut().unwrap().timeline_runtime.as_mut().unwrap();

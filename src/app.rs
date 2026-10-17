@@ -18836,6 +18836,12 @@ impl CitrusApp {
         let mut edit_request = None;
         let mut delete_request = None;
         let mut insert_request = false;
+        let mut shape_request = None;
+        let shape_options_id = egui::Id::new(("automation-shape-options", automation_id));
+        let mut shape_options = ui.ctx().data_mut(|data| {
+            data.get_temp::<crate::automation::AutomationShapeOptions>(shape_options_id)
+                .unwrap_or_default()
+        });
         inspector_section(ui, "AUTOMATION", |ui| {
             property_line(
                 ui,
@@ -18959,6 +18965,33 @@ impl CitrusApp {
                     ui.selectable_value(&mut curve, AutomationCurve::Hold, "Hold / step");
                 });
             automation.lane.set_curve(curve);
+            ui.menu_button("SHAPES", |ui| {
+                use crate::automation::AutomationShape;
+                ui.label("Replace this clip's source region");
+                ui.label(RichText::new("Edits all placements sharing this automation source.").small());
+                ui.add(egui::Slider::new(&mut shape_options.depth, 0.0..=1.0).text("Depth"))
+                    .on_hover_text("Fraction of the target's value range, centered at its midpoint.");
+                ui.add(egui::Slider::new(&mut shape_options.cycles, 1.0..=16.0).text("Cycles"))
+                    .on_hover_text("Repeats across this clip's source region; applies to Steps, Sine and Triangle.");
+                ui.add(egui::Slider::new(&mut shape_options.phase, 0.0..=1.0).text("Phase"))
+                    .on_hover_text("Cycle offset for Steps, Sine and Triangle.");
+                if curve == AutomationCurve::Hold {
+                    ui.label(RichText::new("Hold interpolation: curves play as small steps.").color(theme::AMBER));
+                }
+                for (shape, label) in [
+                    (AutomationShape::Rise, "Rise"),
+                    (AutomationShape::Fall, "Fall"),
+                    (AutomationShape::EasedRise, "Eased rise"),
+                    (AutomationShape::Steps, "Steps"),
+                    (AutomationShape::Sine, "Sine"),
+                    (AutomationShape::Triangle, "Triangle"),
+                ] {
+                    if ui.button(label).clicked() {
+                        shape_request = Some(shape);
+                        ui.close();
+                    }
+                }
+            }).response.on_hover_text("Generate points within the clip's source range. Shared placements also change. Outside points and interpolation are retained. Undo restores the previous shape.");
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("{} control points", points.len()))
@@ -18973,7 +19006,7 @@ impl CitrusApp {
             });
             for (point_index, original) in points.iter().copied().enumerate() {
                 let mut point = original;
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(
                         RichText::new(format!("{:02}", point_index + 1))
                             .monospace()
@@ -18991,8 +19024,9 @@ impl CitrusApp {
                                 // of a segment. Viewing must not relocate its endpoints.
                                 .clamp_existing_to_range(false)
                                 .speed(0.05)
-                                .prefix("B "),
+                                .prefix("Beat "),
                         )
+                        .on_hover_text("Position in the shared automation source, in beats")
                         .changed();
                     let value_range = automation.lane.value_range();
                     let value_changed = ui
@@ -19000,16 +19034,18 @@ impl CitrusApp {
                             egui::DragValue::new(&mut point.value)
                                 .range(value_range.min..=value_range.max)
                                 .speed((value_range.max - value_range.min).max(0.01) / 200.0)
-                                .prefix("V "),
+                                .prefix("Value "),
                         )
+                        .on_hover_text("Target's native value (for example BPM for tempo)")
                         .changed();
                     let tension_changed = ui
                         .add(
                             egui::DragValue::new(&mut point.tension)
                                 .range(-1.0..=1.0)
                                 .speed(0.01)
-                                .prefix("T "),
+                                .prefix("Curve "),
                         )
+                        .on_hover_text("Outgoing tension; used only with Tension interpolation")
                         .changed();
                     if position_changed || value_changed || tension_changed {
                         edit_request = Some((point_index, point));
@@ -19037,6 +19073,40 @@ impl CitrusApp {
             let _ = automation
                 .lane
                 .insert_point(AutomationPoint::new(position, value));
+        }
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(shape_options_id, shape_options));
+        if let Some(shape) = shape_request {
+            // Explicit candidate commit prevents the normal 500 ms edit coalescer
+            // from absorbing this whole-source operation into a preceding edit.
+            let mut candidate = self.project.clone();
+            let lane = &mut candidate
+                .automation_lanes
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .expect("inspected lane still exists")
+                .lane;
+            match lane.apply_shape(
+                f64::from(source_offset),
+                f64::from(source_offset) + f64::from(clip_length),
+                shape,
+                shape_options,
+            ) {
+                Ok(true) => {
+                    commit_explicit_project_history_transaction(
+                        &mut self.project,
+                        &mut self.history_snapshot,
+                        &mut self.history_fingerprint,
+                        &mut self.undo_stack,
+                        &mut self.redo_stack,
+                        &mut self.dirty,
+                        candidate,
+                    );
+                    self.automation_evaluator.reset();
+                }
+                Ok(false) => {}
+                Err(error) => self.notify(format!("Could not generate shape: {error}")),
+            }
         }
     }
 
@@ -24833,11 +24903,26 @@ impl CitrusApp {
                 );
                 continue;
             }
+            let resize_tool = matches!(
+                self.piano_roll_state.tool,
+                PianoRollTool::Draw
+                    | PianoRollTool::Paint
+                    | PianoRollTool::Select
+                    | PianoRollTool::Stamp
+            );
             let response = ui.interact(body_rect, id, Sense::click_and_drag());
             let resize_response = ui
                 .interact(resize_rect, id.with("resize"), Sense::click_and_drag())
-                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                .on_hover_text("Drag the note end to resize · Alt bypasses snap");
+                .on_hover_cursor(if resize_tool {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::Default
+                })
+                .on_hover_text(if resize_tool {
+                    "Drag the note end to resize · Alt bypasses snap"
+                } else {
+                    "Apply the selected tool to this note"
+                });
             let selected = self.piano_roll_state.selection_ids.contains(&note.id);
             note_grid_painter.rect_filled(
                 rect,
@@ -24884,12 +24969,17 @@ impl CitrusApp {
             if primary_pressed
                 && ui.is_enabled()
                 && (piano_mouse::owns_primary_press(&response)
-                    || (selecting && piano_mouse::owns_primary_press(&resize_response)))
+                    || ((selecting || !resize_tool)
+                        && piano_mouse::owns_primary_press(&resize_response)))
             {
                 mouse_press = Some(piano_mouse::PressTarget::Note(note.id));
                 self.piano_roll_state.last_note_length = note.length;
             }
-            if primary_pressed && !selecting && piano_mouse::owns_primary_press(&resize_response) {
+            if primary_pressed
+                && !selecting
+                && resize_tool
+                && piano_mouse::owns_primary_press(&resize_response)
+            {
                 // The edge grip owns the press even in a complete batched drag.
                 mouse_press = None;
             }
@@ -24906,7 +24996,7 @@ impl CitrusApp {
             {
                 properties_request = Some(note.id);
             }
-            if response.clicked() {
+            if response.clicked() || (!resize_tool && resize_response.clicked()) {
                 note_clicked = true;
                 if !selecting {
                     match self.piano_roll_state.tool {
@@ -24924,13 +25014,8 @@ impl CitrusApp {
                                 ));
                             }
                         }
-                        PianoRollTool::Delete => {
-                            delete_note_ids = Some(note_group_members(
-                                &note_snapshot,
-                                note.id,
-                                grouping_enabled,
-                            ));
-                        }
+                        // Erase owns the complete press/drag/release transaction.
+                        PianoRollTool::Delete => {}
                         PianoRollTool::Mute => {
                             group_mute_request = Some((
                                 note_group_members(&note_snapshot, note.id, grouping_enabled),
@@ -24938,7 +25023,10 @@ impl CitrusApp {
                             ));
                         }
                         PianoRollTool::Slice => {
-                            if let Some(pointer) = response.interact_pointer_pos() {
+                            if let Some(pointer) = response
+                                .interact_pointer_pos()
+                                .or_else(|| resize_response.interact_pointer_pos())
+                            {
                                 let raw = self
                                     .piano_viewport
                                     .x
@@ -24962,7 +25050,7 @@ impl CitrusApp {
                     }
                 }
             }
-            if response.secondary_clicked() {
+            if response.secondary_clicked() || resize_response.secondary_clicked() {
                 delete_note_ids = Some(note_group_members(
                     &note_snapshot,
                     note.id,
@@ -24970,7 +25058,7 @@ impl CitrusApp {
                 ));
                 note_clicked = true;
             }
-            if resize_response.clicked() && !selecting {
+            if resize_response.clicked() && !selecting && resize_tool {
                 self.piano_roll_state.last_note_length = note.length;
                 ensure_note_group_selected(
                     &note_snapshot,
@@ -24981,6 +25069,7 @@ impl CitrusApp {
                 note_clicked = true;
             }
             let resize_started = ui.is_enabled()
+                && resize_tool
                 && !selecting
                 && primary_pressed
                 && piano_mouse::owns_primary_press(&resize_response)
@@ -25175,37 +25264,7 @@ impl CitrusApp {
                 }
             }
         }
-        if self.piano_roll_state.tool == PianoRollTool::Delete
-            && !selecting
-            && grid_response.dragged()
-            && let Some(pointer) = grid_response.interact_pointer_pos()
-            && let Some(pitch) =
-                piano_pitch_at_pixel(self.piano_viewport.y, f64::from(pointer.y - grid.top()))
-        {
-            let beat = self
-                .piano_viewport
-                .x
-                .content_at_pixel(f64::from(pointer.x - grid.left())) as f32;
-            let current_channel = selected_channel_route.map(|(channel_id, _)| channel_id);
-            if let Some(note_id) = notes.iter().find_map(|note| {
-                (note.channel_id == current_channel
-                    && note.note == pitch
-                    && beat >= note.start
-                    && beat <= note.start + note.length)
-                    .then_some(note.id)
-            }) {
-                delete_note_ids = Some(note_group_members(
-                    &note_snapshot,
-                    note_id,
-                    grouping_enabled,
-                ));
-            }
-        }
-        if matches!(
-            self.piano_roll_state.tool,
-            PianoRollTool::Paint | PianoRollTool::Delete
-        ) && !selecting
-        {
+        if self.piano_roll_state.tool == PianoRollTool::Paint && !selecting {
             project_gesture_started |= grid_response.drag_started()
                 || (primary_pressed
                     && matches!(mouse_press, Some(piano_mouse::PressTarget::Canvas))

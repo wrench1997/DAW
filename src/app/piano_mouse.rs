@@ -13,6 +13,9 @@ pub(super) enum PressTarget {
 #[derive(Clone, Debug)]
 enum GestureKind {
     Selection,
+    Erase {
+        last_point: Option<Pos2>,
+    },
     Marquee {
         before: HashSet<u64>,
     },
@@ -93,17 +96,33 @@ pub(super) fn note_rects(
         ),
     );
     let rect = raw.intersect(grid);
+    // Reserve most of a short note for moving. The grip may extend beyond the
+    // painted end, but must never cover the body (including at minimum zoom).
+    let grip_width = (raw.width() * 0.35).min(12.0);
+    let boundary = raw.right() - grip_width;
     let resize = Rect::from_min_max(
-        Pos2::new(raw.right() - raw.width().min(12.0), raw.top()),
+        Pos2::new(boundary, raw.top()),
         Pos2::new(raw.right() + 3.0, raw.bottom()),
     )
     .intersect(grid);
-    let body = Rect::from_min_max(
-        raw.left_top(),
-        Pos2::new(resize.left().max(rect.left() + 2.0), rect.bottom()),
-    )
-    .intersect(grid);
+    let body =
+        Rect::from_min_max(raw.left_top(), Pos2::new(boundary, raw.bottom())).intersect(grid);
     (raw, rect, body, resize)
+}
+
+// Minimum painted width must not turn a note culled by the renderer into a hit.
+fn note_is_visible(viewport: crate::editor_viewport::Viewport2D, note: &PianoNote) -> bool {
+    note.note <= 127
+        && content_span_is_visible(
+            viewport.x,
+            f64::from(note.start),
+            f64::from(note.start + note.length),
+        )
+        && content_span_is_visible(
+            viewport.y,
+            piano_pitch_row(note.note),
+            piano_pitch_row(note.note) + 1.0,
+        )
 }
 
 pub(super) fn resolve_batched_press(
@@ -134,7 +153,7 @@ pub(super) fn resolve_batched_press(
     let winner = notes
         .iter()
         .rev()
-        .filter(|n| n.channel_id == channel && n.note <= 127)
+        .filter(|n| n.channel_id == channel && note_is_visible(viewport, n))
         .find_map(|note| {
             let (_, _, body, resize) = note_rects(grid, viewport, note);
             let id = Id::new(("piano-note", note.id));
@@ -328,6 +347,9 @@ impl CitrusApp {
                             );
                         }
                         GestureKind::Selection
+                    } else if self.piano_roll_state.tool == PianoRollTool::Delete {
+                        self.begin_piano_mouse_history();
+                        GestureKind::Erase { last_point: None }
                     } else if matches!(
                         self.piano_roll_state.tool,
                         PianoRollTool::Draw
@@ -372,6 +394,10 @@ impl CitrusApp {
                         self.piano_roll_state.clear_selection();
                     }
                     GestureKind::Marquee { before }
+                }
+                PressTarget::Canvas if self.piano_roll_state.tool == PianoRollTool::Delete => {
+                    self.begin_piano_mouse_history();
+                    GestureKind::Erase { last_point: None }
                 }
                 PressTarget::Canvas if self.piano_roll_state.tool == PianoRollTool::Draw => {
                     let Some(mut pitch) = piano_pitch_at_pixel(
@@ -477,6 +503,64 @@ impl CitrusApp {
         if down || released {
             match &mut gesture.kind {
                 GestureKind::Selection => {}
+                GestureKind::Erase { last_point } => {
+                    // Consume real pointer events in order, including a complete down/up
+                    // batch. Starting on a note and starting on blank grid share ownership.
+                    let points = ctx.input(|input| {
+                        let mut points = Vec::new();
+                        let mut held = press.is_none();
+                        for event in &input.events {
+                            match event {
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    ..
+                                } => {
+                                    held = *pressed;
+                                    points.push(*pos);
+                                }
+                                egui::Event::PointerMoved(pos) if held => points.push(*pos),
+                                _ => {}
+                            }
+                        }
+                        points
+                    });
+                    for point in points.into_iter().filter(|p| grid.contains(*p)) {
+                        if *last_point == Some(point) {
+                            continue;
+                        }
+                        *last_point = Some(point);
+                        let notes = &self.project.active_pattern().notes;
+                        let hit = notes
+                            .iter()
+                            .rev()
+                            .find(|note| {
+                                if note.channel_id != channel
+                                    || !note_is_visible(self.piano_viewport, note)
+                                {
+                                    return false;
+                                }
+                                let (_, _, body, edge) =
+                                    note_rects(grid, self.piano_viewport, note);
+                                body.contains(point) || edge.contains(point)
+                            })
+                            .map(|note| note.id);
+                        if let Some(id) = hit {
+                            let ids = note_group_members(
+                                notes,
+                                id,
+                                self.piano_roll_state.grouping_enabled,
+                            );
+                            let notes = &mut self.project.active_pattern_mut().notes;
+                            notes.retain(|note| !ids.contains(&note.id));
+                            normalize_piano_note_groups(notes);
+                            self.piano_roll_state
+                                .selection_ids
+                                .retain(|id| !ids.contains(id));
+                        }
+                    }
+                }
                 GestureKind::Marquee { before } => {
                     let marquee = Rect::from_two_pos(gesture.pointer, pointer).intersect(grid);
                     if gesture.moved {

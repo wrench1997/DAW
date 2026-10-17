@@ -19,7 +19,10 @@ fn current_fixture() -> TopologyFixture {
 
 fn service_existing_callback(test: &mut TopologyFixture) -> bool {
     let before = test.snapshot();
-    if before.callback_work_pending()
+    // A real device keeps publishing prepared-Play readiness after asynchronous
+    // worker settlement, even when no input command remains queued.
+    if test.fixture.app.prepared_playback_start.is_some()
+        || before.callback_work_pending()
         || before.request_id
             != test
                 .fixture
@@ -44,7 +47,7 @@ fn ordinary_until(test: &mut TopologyFixture, condition: impl Fn(&TopologyFixtur
             "bounded current-source condition failed: {}",
             test.fixture.timeout_metadata()
         );
-        test.ordinary_poll();
+        test.ordinary_playback_poll();
         service_existing_callback(test);
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -594,10 +597,31 @@ fn current_source_edit_away_and_back_rejects_actual_superseded_compile() {
 }
 
 #[test]
+fn current_source_ordinary_playback_poll_completes_prepared_play_before_stop() {
+    let mut test = current_fixture();
+    test.fixture.app.toggle_play();
+    assert!(test.fixture.app.prepared_playback_start.is_some());
+    assert!(!test.snapshot().playing);
+    ordinary_until(&mut test, |test| {
+        test.snapshot().playing
+            && test.fixture.app.playing
+            && test.fixture.app.prepared_playback_start.is_none()
+    });
+    test.fixture.app.stop();
+    assert!(!test.fixture.app.playing);
+    assert!(service_existing_callback(&mut test));
+    assert!(!test.snapshot().playing);
+}
+
+#[test]
 fn current_source_stop_reaches_callback_while_replacement_compile_waits() {
     let mut test = current_fixture();
     test.fixture.app.toggle_play();
-    ordinary_until(&mut test, |test| test.snapshot().playing);
+    // The callback accepts first; the next ordinary App poll consumes that
+    // exact prepared-start acknowledgment before the Stop scenario begins.
+    ordinary_until(&mut test, |test| {
+        test.snapshot().playing && test.fixture.app.playing
+    });
     assert!(test.fixture.app.playing);
     test.fixture.app.project.channels[0].pan = 0.25;
     test.fixture.app.request_immediate_timeline_compile();

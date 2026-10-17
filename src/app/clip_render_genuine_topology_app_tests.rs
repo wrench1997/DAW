@@ -167,6 +167,7 @@ impl TopologyFixture {
             verifier_guard: Some(verifier_guard),
             admission_guard: Some(admission),
             cleanup_budget: MOCK_WAIT,
+            whole_join_identities: Vec::new(),
         };
         let mut result = Self {
             fixture,
@@ -297,6 +298,14 @@ impl TopologyFixture {
     }
 
     fn ordinary_poll(&mut self) {
+        self.poll_with_prepared_playback(false);
+    }
+
+    fn ordinary_playback_poll(&mut self) {
+        self.poll_with_prepared_playback(true);
+    }
+
+    fn poll_with_prepared_playback(&mut self, prepare_playback: bool) {
         self.poll += 1;
         let ctx = self.fixture.ctx();
         let app = self.fixture.app_mut();
@@ -311,6 +320,11 @@ impl TopologyFixture {
         app.poll_timeline_compile(&ctx);
         app.poll_audio_asset_events();
         app.poll_timeline_audio_runtime(&ctx);
+        // Focused playback/Stop regressions use the real GUI ordering. The
+        // genuine four-operation ledger keeps its original paused-only poll.
+        if prepare_playback {
+            app.poll_prepared_playback_start(&ctx);
+        }
         app.drive_clip_render_job();
     }
 

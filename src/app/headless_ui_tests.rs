@@ -2697,6 +2697,8 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
 }
 
 include!("piano_keyboard_tests.rs");
+#[path = "automation_shapes_ui_tests.rs"]
+mod automation_shapes_ui_tests;
 #[path = "editor_navigation_tests.rs"]
 mod editor_navigation_tests;
 #[path = "keyboard_audition_ui_tests.rs"]

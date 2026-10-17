@@ -259,6 +259,34 @@ fn enable_preserves_every_prelude_arc_header_and_opaque_allocation() {
 }
 
 #[test]
+fn joined_source_only_stream_keeps_writer_evidence_but_refuses_complete_song_replay() {
+    let fixture = Fixture::new();
+    let (run, _observer) = run();
+    enable(&run, &fixture);
+    let mut owner = run.take_stream_after_taps_retired(true).unwrap();
+    assert!(joined(&mut owner));
+
+    let evidence = owner.writer_evidence();
+    assert_eq!(evidence["transcript"], fixture.transcript.to_str().unwrap());
+    assert_eq!(evidence["states"], fixture.sidecar.to_str().unwrap());
+    assert_eq!(evidence["transcript_actual_writer_joined"], true);
+    assert_eq!(evidence["transcript_complete"], true);
+    assert_eq!(evidence["transcript_records"], 3);
+    assert_eq!(evidence["sidecar_actual_writer_joined"], true);
+    assert_eq!(evidence["state_range_linkage"], true);
+    assert_eq!(evidence["instance_dictionary_complete"], true);
+    assert_eq!(evidence["SDK_or_source_helper_reap_claim"], false);
+
+    // Actual joined writers do not establish a missing clone or renderer run.
+    // Refusal must happen before creating an apparently valid raw output file.
+    let raw = fixture.directory.join("incomplete-song.f32le");
+    let error = owner.replay_to_raw(&raw).unwrap_err();
+    assert_eq!(error.code, "raw replay actual clone birth is absent");
+    assert!(!raw.exists());
+    assert_eq!(owner.writer_evidence(), evidence);
+}
+
+#[test]
 fn streaming_exceeds_both_memory_caps_without_cloning_pcm_or_draining_prelude() {
     let fixture = Fixture::new();
     let (run, observer) = run();

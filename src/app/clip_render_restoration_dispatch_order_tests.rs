@@ -138,9 +138,10 @@ fn boundary(test: &TopologyFixture) -> BoundaryState {
 
 fn service_existing_callback(test: &mut TopologyFixture) -> bool {
     let before = test.snapshot();
-    // Identical service eligibility to TopologyFixture::checked_pump_inner.
-    // These focused boundary cases are deliberately outside its four-op ledger.
-    if before.callback_work_pending()
+    // These focused boundary cases are outside the paused four-op ledger.
+    // A real callback also publishes readiness after worker-only Play preparation.
+    if test.fixture.app.prepared_playback_start.is_some()
+        || before.callback_work_pending()
         || before.request_id
             != test
                 .fixture
@@ -164,7 +165,7 @@ fn ordinary_until(test: &mut TopologyFixture, condition: impl Fn(&TopologyFixtur
             "restoration boundary wait: {}",
             test.fixture.timeout_metadata()
         );
-        test.ordinary_poll();
+        test.ordinary_playback_poll();
         service_existing_callback(test);
         std::thread::sleep(Duration::from_millis(10));
     }

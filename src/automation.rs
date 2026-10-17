@@ -10,6 +10,10 @@ use thiserror::Error;
 
 use crate::mixer_graph::{MASTER_MIXER_TRACK_ID, MixerTrackId};
 
+#[path = "automation_shapes.rs"]
+mod shapes;
+pub use shapes::{AutomationShape, AutomationShapeOptions, MAX_SHAPE_POINTS};
+
 /// Points closer than this many beats are treated as the same timeline point.
 pub const AUTOMATION_POSITION_EPSILON: f64 = 1.0e-9;
 
@@ -257,6 +261,10 @@ impl AutomationNormalizationReport {
 
 #[derive(Clone, Debug, PartialEq, Error)]
 pub enum AutomationError {
+    #[error("shape region must be finite, nonnegative, and wide enough for distinct points")]
+    InvalidShapeRegion,
+    #[error("shape cycles, depth, and phase must be finite")]
+    InvalidShapeOptions,
     #[error("automation point position must be finite")]
     NonFinitePosition,
     #[error("automation point value must be finite")]

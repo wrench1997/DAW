@@ -719,7 +719,7 @@ impl Default for Project {
                 5,
                 8.0,
                 8.0,
-                "Filter sweep",
+                "Keys volume",
                 [238, 109, 153],
                 ClipKind::Automation,
             ),
@@ -795,7 +795,9 @@ impl Default for Project {
             channel_steps: channels.iter().map(|channel| channel.steps).collect(),
             notes: notes.clone(),
         };
-        let mut volume_automation = AutomationLane::new(AutomationTarget::MixerVolume { track: 7 });
+        // Neon Keys (channel 5) feeds mixer 6; the demo has no filter target.
+        let mut volume_automation = AutomationLane::new(AutomationTarget::MixerVolume { track: 6 });
+        volume_automation.set_curve(crate::automation::AutomationCurve::Tension);
         volume_automation.replace_points([
             AutomationPoint::with_tension(0.0, 0.22, 0.25),
             AutomationPoint::with_tension(4.0, 0.68, -0.15),
@@ -817,7 +819,7 @@ impl Default for Project {
             mixer_tracks,
             automation_lanes: vec![ProjectAutomation {
                 id: 1,
-                name: "Lead volume".into(),
+                name: "Keys volume".into(),
                 lane: volume_automation,
             }],
             audio_assets: Vec::new(),

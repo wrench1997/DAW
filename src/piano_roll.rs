@@ -464,8 +464,22 @@ pub fn ensure_note_group_selected(
 
 impl PianoRollState {
     pub fn retain_existing(&mut self, notes: &[PianoNote]) {
-        self.selection_ids
-            .retain(|id| notes.iter().any(|note| note.id == *id));
+        if self.selection_ids.is_empty() {
+            return;
+        }
+        if notes.is_empty() {
+            self.selection_ids.clear();
+            return;
+        }
+        // Tiny selections are cheaper to scan without allocating a lookup.
+        // Bound this path so selecting an entire score cannot become quadratic.
+        if self.selection_ids.len() <= 32 {
+            self.selection_ids
+                .retain(|id| notes.iter().any(|note| note.id == *id));
+            return;
+        }
+        let existing_ids: HashSet<u64> = notes.iter().map(|note| note.id).collect();
+        self.selection_ids.retain(|id| existing_ids.contains(id));
     }
 
     pub fn select_only(&mut self, id: u64) {
@@ -2403,6 +2417,85 @@ mod tests {
         state.retain_existing(&notes[1..]);
         assert_eq!(state.selection_ids, HashSet::from([2]));
         assert!(notes.iter().all(|note| !note.selected));
+    }
+
+    #[test]
+    fn retain_existing_keeps_large_selection_without_changing_project_notes() {
+        let notes: Vec<_> = (1..=10_000)
+            .map(|id| note(id, id as f32 / 4.0, 0.25, id % 2 == 0))
+            .collect();
+        let before = format!("{notes:?}");
+        let mut state = PianoRollState {
+            selection_ids: notes.iter().map(|note| note.id).collect(),
+            ..PianoRollState::default()
+        };
+        let expected = state.selection_ids.clone();
+
+        state.retain_existing(&notes);
+
+        assert_eq!(state.selection_ids, expected);
+        assert_eq!(format!("{notes:?}"), before);
+    }
+
+    #[test]
+    fn retain_existing_intersects_partial_selection_and_removes_stale_ids() {
+        let notes: Vec<_> = (1..=1_000).map(|id| note(id, 0.0, 1.0, false)).collect();
+        let mut state = PianoRollState {
+            selection_ids: (0..=1_200).filter(|id| id % 3 == 0).collect(),
+            ..PianoRollState::default()
+        };
+
+        state.retain_existing(&notes);
+
+        let expected: HashSet<_> = (1..=1_000).filter(|id| id % 3 == 0).collect();
+        assert_eq!(state.selection_ids, expected);
+        state.selection_ids = (1_001..=1_010).collect();
+        state.retain_existing(&notes);
+        assert!(state.selection_ids.is_empty());
+    }
+
+    #[test]
+    fn retain_existing_handles_empty_selection_and_empty_score() {
+        let notes = [note(1, 0.0, 1.0, true)];
+        let mut state = PianoRollState::default();
+        state.retain_existing(&notes);
+        assert!(state.selection_ids.is_empty());
+        state.retain_existing(&[]);
+        assert!(state.selection_ids.is_empty());
+        for count in [1, 32, 33, 1_000] {
+            state.selection_ids = (1..=count).collect();
+            state.retain_existing(&[]);
+            assert!(state.selection_ids.is_empty());
+        }
+        assert!(notes[0].selected);
+    }
+
+    #[test]
+    fn retain_existing_preserves_exact_ids_across_lookup_threshold() {
+        // Even legacy zero and duplicate IDs retain the original membership
+        // semantics; normalization, grouping and selection flags are unrelated.
+        let notes = [
+            note(u64::MAX, 0.0, 1.0, false),
+            note(0, 1.0, 1.0, true),
+            note(42, 2.0, 1.0, false),
+            note(42, 3.0, 1.0, true),
+        ];
+        for selection in [
+            vec![u64::MAX],
+            (0..30).chain([42, u64::MAX]).collect(),
+            (0..31).chain([42, u64::MAX]).collect(),
+        ] {
+            let mut state = PianoRollState {
+                selection_ids: selection.into_iter().collect(),
+                ..PianoRollState::default()
+            };
+            let mut expected = state.selection_ids.clone();
+            expected.retain(|id| notes.iter().any(|note| note.id == *id));
+
+            state.retain_existing(&notes);
+
+            assert_eq!(state.selection_ids, expected);
+        }
     }
 
     #[test]

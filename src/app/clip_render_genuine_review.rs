@@ -292,6 +292,7 @@ pub(super) fn observe(app: &CitrusApp, before: Option<&ReviewObservation>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::occurrence_request::OccurrenceStamp;
     use crate::timeline::{NoteSourceDescriptor, TimelineEvent, TimelineEventKind};
 
     fn command_key(command: &AudioCommand) -> (u8, usize, u32) {
