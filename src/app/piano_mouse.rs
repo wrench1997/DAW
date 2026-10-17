@@ -254,6 +254,32 @@ fn clone_notes(project: &Project, origins: &[PianoNote]) -> Option<Vec<PianoNote
         .collect()
 }
 
+// Rebuild per update: project edits and cloned notes cannot leave a stale index.
+// Repeated origin IDs historically update the first matching note, last origin wins.
+fn for_each_move_target(
+    notes: &mut [PianoNote],
+    origins: &[PianoNote],
+    mut apply: impl FnMut(&mut PianoNote, &PianoNote),
+) {
+    if origins.len() <= 1 {
+        for origin in origins {
+            if let Some(note) = notes.iter_mut().find(|note| note.id == origin.id) {
+                apply(note, origin);
+            }
+        }
+        return;
+    }
+    let mut targets: HashMap<_, _> = origins.iter().map(|origin| (origin.id, origin)).collect();
+    for note in notes {
+        if let Some(origin) = targets.remove(&note.id) {
+            apply(note, origin);
+        }
+        if targets.is_empty() {
+            break;
+        }
+    }
+}
+
 impl CitrusApp {
     fn piano_mouse_coordinates(&self) -> [f64; 4] {
         [
@@ -364,9 +390,19 @@ impl CitrusApp {
                             self.piano_roll_state.grouping_enabled,
                         );
                         // A ghost channel is context only. Hidden selections never mutate behind it.
-                        self.piano_roll_state.selection_ids.retain(|id| {
-                            notes.iter().any(|n| n.id == *id && n.channel_id == channel)
-                        });
+                        let selection = &mut self.piano_roll_state.selection_ids;
+                        if selection.len() <= 1 {
+                            selection.retain(|id| {
+                                notes.iter().any(|n| n.id == *id && n.channel_id == channel)
+                            });
+                        } else {
+                            let channel_ids: HashSet<_> = notes
+                                .iter()
+                                .filter(|n| n.channel_id == channel && selection.contains(&n.id))
+                                .map(|n| n.id)
+                                .collect();
+                            selection.retain(|id| channel_ids.contains(id));
+                        }
                         let origins: Vec<_> = notes
                             .iter()
                             .filter(|n| self.piano_roll_state.selection_ids.contains(&n.id))
@@ -681,14 +717,10 @@ impl CitrusApp {
                                     && !lock_pitch;
                                 let scale_root = self.piano_roll_state.scale_root;
                                 let scale = self.piano_roll_state.scale;
-                                for origin in targets {
-                                    if let Some(note) = self
-                                        .project
-                                        .active_pattern_mut()
-                                        .notes
-                                        .iter_mut()
-                                        .find(|n| n.id == origin.id)
-                                    {
+                                for_each_move_target(
+                                    &mut self.project.active_pattern_mut().notes,
+                                    targets,
+                                    |note, origin| {
                                         note.start = origin.start + time;
                                         let pitch = (i16::from(origin.note) + pitch) as u8;
                                         note.note = if scale_snap {
@@ -696,8 +728,8 @@ impl CitrusApp {
                                         } else {
                                             pitch
                                         };
-                                    }
-                                }
+                                    },
+                                );
                             }
                         }
                     }
@@ -765,6 +797,50 @@ impl CitrusApp {
             self.finish_piano_roll_gesture();
         } else {
             ctx.data_mut(|data| data.insert_temp(key(), gesture));
+        }
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    #[test]
+    fn move_lookup_matches_linear_first_note_last_origin_and_missing_ids() {
+        let note = |id, start| PianoNote {
+            id,
+            start,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            length: 0.5,
+            velocity: 0.75,
+            selected: false,
+            muted: false,
+        };
+        let notes = vec![note(1, 0.0), note(2, 1.0), note(1, 2.0), note(3, 3.0)];
+        for origins in [
+            vec![],
+            vec![note(1, 4.0)],
+            vec![note(99, 5.0)],
+            vec![note(2, 6.0), note(1, 7.0), note(99, 8.0), note(1, 9.0)],
+        ] {
+            let mut expected = notes.clone();
+            for origin in &origins {
+                if let Some(note) = expected.iter_mut().find(|n| n.id == origin.id) {
+                    note.start = origin.start + 0.25;
+                    note.note = origin.note + 1;
+                }
+            }
+            let mut actual = notes.clone();
+            for_each_move_target(&mut actual, &origins, |note, origin| {
+                note.start = origin.start + 0.25;
+                note.note = origin.note + 1;
+            });
+            assert_eq!(
+                serde_json::to_string(&actual).unwrap(),
+                serde_json::to_string(&expected).unwrap()
+            );
         }
     }
 }

@@ -414,10 +414,34 @@ pub fn expand_note_group_selection(
     selection_ids: &HashSet<u64>,
     grouping_enabled: bool,
 ) -> HashSet<u64> {
-    selection_ids
-        .iter()
-        .flat_map(|note_id| note_group_members(notes, *note_id, grouping_enabled))
-        .collect()
+    if selection_ids.len() <= 1 {
+        return selection_ids
+            .iter()
+            .flat_map(|note_id| note_group_members(notes, *note_id, grouping_enabled))
+            .collect();
+    }
+    // Match note_group_members' first-note semantics even for duplicate IDs.
+    // This lookup lives only for this operation, so project changes cannot stale it.
+    let mut seen = HashSet::with_capacity(selection_ids.len());
+    let mut expanded = HashSet::with_capacity(selection_ids.len());
+    let mut groups = HashSet::new();
+    for note in notes {
+        if selection_ids.contains(&note.id) && seen.insert(note.id) {
+            if let Some(group) = note.group_id.filter(|_| grouping_enabled) {
+                groups.insert((note.channel_id, group));
+            } else {
+                expanded.insert(note.id);
+            }
+        }
+    }
+    if !groups.is_empty() {
+        expanded.extend(notes.iter().filter_map(|note| {
+            note.group_id
+                .filter(|group| groups.contains(&(note.channel_id, *group)))
+                .map(|_| note.id)
+        }));
+    }
+    expanded
 }
 
 pub fn toggle_note_group_selection(
@@ -3967,5 +3991,58 @@ mod repeated_range_precision_tests {
             .is_err()
         );
         assert_eq!(serde_json::to_string(&notes).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod selection_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn selection_expansion_matches_linear_groups_duplicates_and_stale_ids() {
+        let note = |id, channel_id, group_id| PianoNote {
+            id,
+            channel_id,
+            group_id,
+            note: 60,
+            start: 0.0,
+            length: 0.5,
+            velocity: 0.75,
+            selected: false,
+            muted: false,
+        };
+        let notes = vec![
+            note(1, Some(1), Some(7)),
+            note(2, Some(1), Some(7)),
+            note(1, Some(2), Some(8)),
+            note(3, Some(2), Some(8)),
+            note(4, Some(2), Some(7)),
+            note(5, None, None),
+            note(6, None, Some(7)),
+            note(7, None, Some(7)),
+            note(8, Some(1), Some(0)),
+            note(9, Some(1), Some(0)),
+            note(10, Some(2), Some(0)),
+        ];
+        for enabled in [false, true] {
+            for selected in [
+                HashSet::new(),
+                HashSet::from([1]),
+                HashSet::from([99]),
+                HashSet::from([1, 5, 6, 99]),
+                HashSet::from([8, 99]),
+                HashSet::from([8, 10]),
+                HashSet::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 99]),
+            ] {
+                let expected: HashSet<_> = selected
+                    .iter()
+                    .flat_map(|id| note_group_members(&notes, *id, enabled))
+                    .collect();
+                assert_eq!(
+                    expand_note_group_selection(&notes, &selected, enabled),
+                    expected
+                );
+            }
+        }
     }
 }

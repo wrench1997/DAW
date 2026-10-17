@@ -1462,3 +1462,84 @@ fn piano_mouse_minimum_zoom_culled_note_cannot_steal_or_erase_blank_edge() {
         }
     }
 }
+
+#[test]
+fn piano_mouse_large_selection_moves_once_and_focus_cannot_resume() {
+    for all in [false, true] {
+        for lose_focus in [false, true] {
+            let mut ui = fixture();
+            ui.app.piano_roll_state.grouping_enabled = false;
+            let template = note(&ui, 90001).clone();
+            for index in 0..128 {
+                ui.app.project.active_pattern_mut().notes.push(PianoNote {
+                    id: 100_000 + index,
+                    start: 32.0 + index as f32,
+                    group_id: None,
+                    ..template.clone()
+                });
+            }
+            ui.app.sync_history_observer();
+            ui.app.undo_stack.clear();
+            ui.settle();
+            let before = ui.app.project.active_pattern().notes.clone();
+            let fingerprint = project_fingerprint(&ui.app.project);
+            ui.app.piano_roll_state.selection_ids = if all {
+                before.iter().map(|n| n.id).collect()
+            } else {
+                HashSet::from([90001])
+            };
+            // Stale and ghost selections must not move hidden-channel notes.
+            ui.app.piano_roll_state.selection_ids.insert(u64::MAX);
+            let from = body(&ui, 90001);
+            let to = from + Vec2::new(48.0, -20.0);
+            mouse(&mut ui, from, Some(true), egui::Modifiers::NONE);
+            mouse(&mut ui, to, None, egui::Modifiers::NONE);
+            let time_delta = note(&ui, 90001).start - before[0].start;
+            let pitch_delta = i16::from(note(&ui, 90001).note) - i16::from(before[0].note);
+            assert!(time_delta > 0.0);
+            assert!(pitch_delta > 0);
+            for (old, new) in before.iter().zip(&ui.app.project.active_pattern().notes) {
+                let moves = old.id == 90001 || (all && old.channel_id == template.channel_id);
+                let mut expected = old.clone();
+                if moves {
+                    expected.start += time_delta;
+                    expected.note = (i16::from(expected.note) + pitch_delta) as u8;
+                }
+                assert_eq!(
+                    serde_json::to_string(new).unwrap(),
+                    serde_json::to_string(&expected).unwrap(),
+                    "all={all}, focus={lose_focus}"
+                );
+            }
+            assert!(!ui.app.piano_roll_state.selection_ids.contains(&90003));
+            assert!(!ui.app.piano_roll_state.selection_ids.contains(&u64::MAX));
+            let preview = project_fingerprint(&ui.app.project);
+            if lose_focus {
+                ui.time += 0.1;
+                let _ = ui.ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, ui.size)),
+                        time: Some(ui.time),
+                        focused: false,
+                        events: vec![egui::Event::WindowFocused(false)],
+                        ..Default::default()
+                    },
+                    |root| ui.app.ui(root, &mut ui.frame),
+                );
+                ui.run(vec![egui::Event::WindowFocused(true)]);
+                mouse(
+                    &mut ui,
+                    to + Vec2::new(60.0, 0.0),
+                    None,
+                    egui::Modifiers::NONE,
+                );
+            }
+            mouse(&mut ui, to, Some(false), egui::Modifiers::NONE);
+            ui.settle();
+            assert_eq!(project_fingerprint(&ui.app.project), preview);
+            assert_eq!(ui.app.undo_stack.len(), 1);
+            ui.key(egui::Key::Z, piano_clipboard_command());
+            assert_eq!(project_fingerprint(&ui.app.project), fingerprint);
+        }
+    }
+}
