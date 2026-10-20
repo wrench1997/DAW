@@ -261,6 +261,18 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
             "compact controls leave room for the melody: {grid:?}"
         );
         assert!(window.contains_rect(grid));
+        let velocity = ui
+            .ctx
+            .read_response(Id::new("piano-velocity-lane"))
+            .unwrap()
+            .rect;
+        assert_eq!(
+            velocity.height(),
+            64.0,
+            "large editors retain the full velocity lane"
+        );
+        assert_eq!(velocity.top(), grid.bottom());
+        assert!(window.contains_rect(velocity));
         for label in [
             "NOTE EDIT v",
             "SCALE / CHORD v",
@@ -320,6 +332,17 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
         grid.height() >= 144.0 && window.contains_rect(grid),
         "Longest scale/chord settings retain the minimum grid: {grid:?}"
     );
+    let velocity = ui
+        .ctx
+        .read_response(Id::new("piano-velocity-lane"))
+        .unwrap()
+        .rect;
+    assert!(
+        (48.0..=64.0).contains(&velocity.height()),
+        "short editors preserve usable velocity editing: {velocity:?}"
+    );
+    assert_eq!(velocity.top(), grid.bottom());
+    assert!(window.contains_rect(velocity));
     for node in &ui.nodes {
         if node
             .label()

@@ -2375,3 +2375,10 @@ Final integrated 0f2d928 was rebuilt and launched separately. Actual narrow Insp
 
 - 冻结应用源码0d4d6f8最终全特性/all-target 2836通过、0失败、9既有可选忽略（2845唯一用例）；no-default App2164通过、0失败、1既有忽略（2165唯一用例），三个feature禁用协议目标0测试。两个配置重叠，不相加。双配置严格Clippy、fmt、App/helper构建通过；Python359通过/9既有跳过。真实云端native加载、参数编辑、Undo/Redo、保存/冷重开波形、Ghost只读与稳定布局、空Sampler持久化及WAV导出均有证据。
 - Added guides to package source allowlist, retained actual failures separately, and prepared source/bundle/patch plus native evidence and a portable generated test Project. No remote push or new hardware/Windows claim.
+
+## 2026-10-20 — Publish recovered ghost/Sampler source and repair Windows layout
+
+- Published f7f6fd5 on the existing development history, with source matching delivered 1e0deee and original tracked raw logs/executable modes retained. No main merge or release.
+- Both Windows CI toolchains reproduced one layout failure: longest scale/chord toolbar in a 480×420 editor left a 143px pitch grid versus the unchanged 144px minimum. Each App phase reported 2715 passed, 1 failed, 21 ignored; Linux helper/readiness passed.
+- Made the velocity lane adaptive (48–64px), reserving pitch-grid space while retaining usable expression editing and the full lane in large editors. Added lane bounds, adjacency and containment assertions; no threshold relaxation.
+- Local Python packaging/harness suite: 359 passed, 9 skipped before repair. Rustfmt available; local Rust execution blocked by missing Linux development libraries and package-install environment failure. Exact revised Windows CI remains the acceptance gate.

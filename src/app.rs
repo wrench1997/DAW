@@ -24987,8 +24987,11 @@ impl CitrusApp {
         let piano_content_end = self.piano_ghost_content_end();
         let available = ui.available_rect_before_wrap();
         let keyboard_w = 60.0;
-        let velocity_h = 64.0;
         let timeline_h = 24.0;
+        // Wrapped controls and platform font metrics can consume another row in
+        // short editors. Give the pitch grid priority while retaining a usable
+        // velocity lane; full-height editors keep the usual 64 px lane.
+        let velocity_h = (available.height() - timeline_h - 160.0).clamp(48.0, 64.0);
         let grid = Rect::from_min_max(
             Pos2::new(available.left() + keyboard_w, available.top() + timeline_h),
             Pos2::new(available.right(), available.bottom() - velocity_h),
