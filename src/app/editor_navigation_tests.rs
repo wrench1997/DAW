@@ -74,7 +74,9 @@ fn creation_piano_real_ctrl_wheel_zooms_both_axes_without_editing_notes() {
     let music = project_fingerprint(&ui.app.project);
     let x = ui.app.piano_viewport.x;
     let y = ui.app.piano_viewport.y;
-    let anchor = f64::from(pos.x - surface.left() - 72.0);
+    let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+    assert!(grid.contains(pos));
+    let anchor = f64::from(pos.x - grid.left());
     let beat = x.content_at_pixel(anchor);
     let ctrl = piano_clipboard_command();
     ui.run_with_modifiers(wheel_event(pos, ctrl), ctrl);
@@ -86,7 +88,9 @@ fn creation_piano_real_ctrl_wheel_zooms_both_axes_without_editing_notes() {
         ui.app.piano_viewport.y.pixels_per_unit(),
         y.pixels_per_unit()
     );
-    assert!((ui.app.piano_viewport.x.content_at_pixel(anchor) - beat).abs() < 0.01);
+    let grid_after = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+    let anchor_after = f64::from(pos.x - grid_after.left());
+    assert!((ui.app.piano_viewport.x.content_at_pixel(anchor_after) - beat).abs() < 0.01);
     for _ in 0..20 {
         ui.run_with_modifiers(Vec::new(), ctrl);
     }
@@ -561,8 +565,25 @@ fn creation_buttons_depress_on_press_and_activate_once_on_release() {
             })
             .expect("native button text must still be painted")
     };
+    fn painted_fill(shape: &egui::Shape, bounds: Rect) -> Option<Color32> {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| painted_fill(shape, bounds)),
+            egui::Shape::Rect(face) if face.rect == bounds && face.fill != Color32::TRANSPARENT => {
+                Some(face.fill)
+            }
+            _ => None,
+        }
+    }
+    let face_fill = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| painted_fill(&shape.shape, rect))
+            .expect("the real button face must be painted")
+    };
     let before = ui.run(vec![egui::Event::PointerMoved(rect.center())]);
     let before_text = text_pos(&before);
+    assert_eq!(face_fill(&before), theme::HIGHLIGHT);
     let held = ui.run(mixer_pointer_button(rect.center(), true));
     assert!(
         !ui.app.audio_preferences.metronome_enabled,
@@ -573,9 +594,30 @@ fn creation_buttons_depress_on_press_and_activate_once_on_release() {
         rect,
         "pressed visuals must not move hit bounds"
     );
-    assert_eq!(text_pos(&held).y, before_text.y + 1.0);
+    assert_eq!(
+        text_pos(&held),
+        before_text,
+        "flat pressed paint keeps its text anchored"
+    );
+    assert_eq!(face_fill(&held), theme::WELL);
+    assert_ne!(
+        face_fill(&held),
+        face_fill(&before),
+        "press must have visible feedback"
+    );
+    ui.run(Vec::new());
+    assert!(
+        !ui.app.audio_preferences.metronome_enabled,
+        "holding must not activate"
+    );
     ui.capture("creation-button-held");
     ui.run(mixer_pointer_button(rect.center(), false));
     assert!(ui.app.audio_preferences.metronome_enabled);
+    ui.settle();
+    assert!(
+        ui.app.audio_preferences.metronome_enabled,
+        "release activates exactly once"
+    );
+    assert_eq!(node_rect(ui.button("CLICK ON")), rect);
     ui.capture("creation-button-released");
 }

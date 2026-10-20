@@ -639,6 +639,7 @@ impl ExecutorState {
                 source,
             } => {
                 let note = ChasedNote {
+                    elapsed_frames: 0,
                     note_id,
                     channel_id,
                     note,
@@ -1246,6 +1247,7 @@ mod tests {
 
     fn note(note_id: u64, midi_note: u8) -> ChasedNote {
         ChasedNote {
+            elapsed_frames: 0,
             note_id,
             channel_id: 7,
             note: midi_note,

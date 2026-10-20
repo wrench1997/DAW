@@ -34,6 +34,66 @@ pub(super) fn window_id(view: StudioView) -> Id {
     Id::new(("citrus-editor-window-v1", index(view)))
 }
 
+fn editor_name(view: StudioView) -> &'static str {
+    match view {
+        StudioView::Playlist => "Playlist",
+        StudioView::ChannelRack => "Channel Rack",
+        StudioView::PianoRoll => "Piano Roll",
+        StudioView::Mixer => "Mixer",
+    }
+}
+
+fn title_response(ctx: &egui::Context, view: StudioView) -> Option<Response> {
+    ctx.read_response(window_id(view).with("__title_click"))
+}
+
+/// Add a standard maximize affordance on the native title bar, next to its close
+/// button. Use the real title response instead of assuming font/DPI coordinates.
+fn maximize_button(ui: &mut egui::Ui, view: StudioView) -> bool {
+    let Some(title) = title_response(ui.ctx(), view) else {
+        return false;
+    };
+    let rect = Rect::from_min_max(
+        Pos2::new(title.rect.right() - 24.0, title.rect.top() + 2.0),
+        Pos2::new(title.rect.right() - 2.0, title.rect.bottom() - 2.0),
+    );
+    let mut chrome = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("editor-maximize", index(view)))
+            .max_rect(rect),
+    );
+    chrome.set_clip_rect(title.rect);
+    // Capture drags too: pressing this button and moving must not start a native
+    // title move or draw notes after the pointer enters the canvas.
+    let response = chrome.interact(
+        rect,
+        window_id(view).with("maximize"),
+        Sense::click_and_drag(),
+    );
+    let label = format!("Maximize {}", editor_name(view));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, chrome.is_enabled(), &label)
+    });
+    let visuals = chrome.style().interact(&response);
+    chrome.painter().rect_filled(rect, 2, theme::PANEL);
+    chrome.painter().rect(
+        rect,
+        2,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        StrokeKind::Inside,
+    );
+    chrome.painter().rect_stroke(
+        Rect::from_center_size(rect.center(), Vec2::new(10.0, 9.0)),
+        0,
+        visuals.fg_stroke,
+        StrokeKind::Inside,
+    );
+    response
+        .on_hover_text(format!("{label} (or double-click the title)"))
+        .clicked()
+}
+
 fn layer(view: StudioView) -> egui::LayerId {
     egui::LayerId::new(egui::Order::Middle, window_id(view))
 }
@@ -131,6 +191,16 @@ pub(super) struct Workspace {
     chrome_gesture: Option<ChromeGesture>,
     #[serde(skip)]
     pending_rects: [Option<Rect>; 4],
+    #[serde(skip)]
+    restore_requested: bool,
+    #[serde(skip)]
+    sidebar_drag: Option<Id>,
+    #[serde(skip)]
+    sidebar_owner: Option<Id>,
+    #[serde(skip)]
+    sidebar_input_frame: Option<u64>,
+    #[serde(skip)]
+    sidebar_pointer_blocked: bool,
 }
 
 impl Default for Workspace {
@@ -154,6 +224,11 @@ impl Default for Workspace {
             pointer_dragging: false,
             chrome_gesture: None,
             pending_rects: [None; 4],
+            restore_requested: false,
+            sidebar_drag: None,
+            sidebar_owner: None,
+            sidebar_input_frame: None,
+            sidebar_pointer_blocked: false,
         }
     }
 }
@@ -402,6 +477,38 @@ impl CitrusApp {
         }
     }
 
+    pub(super) fn maximized_editor_title(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: StudioView,
+        title: &str,
+        subtitle: &str,
+    ) {
+        let heading = ui.label(RichText::new(title).strong().size(11.0).color(theme::TEXT));
+        let title_response = ui.interact(
+            heading.rect,
+            window_id(view).with("maximized-title"),
+            Sense::click(),
+        );
+        let restore = ui
+            .small_button("Restore")
+            .on_hover_text("Restore floating windows (or double-click the editor title)")
+            .clicked();
+        self.workspace.restore_requested |= title_response.double_clicked() || restore;
+        ui.label(RichText::new(subtitle).size(9.0).color(theme::MUTED));
+    }
+
+    fn toggle_editor_maximized(&mut self, view: StudioView) {
+        self.finish_editor_interaction();
+        if self.workspace.focused != view {
+            self.workspace.focus(view);
+        }
+        self.workspace.maximized = !self.workspace.maximized;
+        self.workspace.dirty = true;
+        self.workspace.restore_order_cursor = 0;
+        self.workspace.raise_focused = 2;
+    }
+
     fn hide_editor(&mut self, view: StudioView) {
         // Every focus transition shares the same edit/history boundary, including fallback
         // focus after closing a Rack/Mixer while their timed observer has pending changes.
@@ -410,6 +517,14 @@ impl CitrusApp {
     }
 
     pub(super) fn workspace_view_menu(&mut self, ui: &mut egui::Ui) {
+        // Moving these controls out of the canvas must retain its modal/gesture barriers.
+        if !ui.input(|input| input.focused)
+            || self.shortcut_blocking_layer_active()
+            || self.top_shortcut_modal().is_some()
+            || self.workspace.cancel_pointer_gesture
+        {
+            ui.disable();
+        }
         for view in EDITORS {
             let mut visible = self.workspace.windows[index(view)].visible;
             if ui.checkbox(&mut visible, title(view)).changed() {
@@ -421,12 +536,34 @@ impl CitrusApp {
             }
         }
         ui.separator();
-        if ui.button("Arrange editor windows").clicked() {
+        if ui.button("Arrange windows").clicked() {
             self.arrange_editors(false);
             ui.close();
         }
-        if ui.button("Cascade editor windows").clicked() {
+        if ui.button("Cascade windows").clicked() {
             self.arrange_editors(true);
+            ui.close();
+        }
+        let any_visible = self.workspace.windows.iter().any(|window| window.visible);
+        if ui
+            .add_enabled(
+                any_visible,
+                egui::Button::new(if self.workspace.maximized {
+                    "Restore windows"
+                } else {
+                    "Maximize editor"
+                }),
+            )
+            .clicked()
+        {
+            self.toggle_editor_maximized(self.workspace.focused);
+            ui.close();
+        }
+        if ui
+            .add_enabled(any_visible, egui::Button::new("Hide editor"))
+            .clicked()
+        {
+            self.hide_editor(self.workspace.focused);
             ui.close();
         }
     }
@@ -437,15 +574,146 @@ impl CitrusApp {
         self.finish_piano_roll_gesture();
     }
 
+    /// Reserve the divider from the raw press position before egui renders any
+    /// panels or floating editors. Native hit testing otherwise uses the final
+    /// position of a coalesced press/move and may award the gesture to a note or
+    /// an overlapping floating resize edge instead of the sidebar.
+    pub(super) fn prepare_sidebar_pointer(&mut self, ui: &egui::Ui) {
+        let ctx = ui.ctx();
+        let frame = ctx.cumulative_frame_nr();
+        let first_pass = self.workspace.sidebar_input_frame != Some(frame);
+        let (down, released, pressed, focused) = ctx.input(|input| {
+            (
+                input.pointer.primary_down(),
+                input.pointer.primary_released(),
+                input.pointer.primary_pressed(),
+                input.focused,
+            )
+        });
+        if first_pass {
+            self.workspace.sidebar_input_frame = Some(frame);
+            self.workspace.sidebar_pointer_blocked = false;
+            if pressed || (!down && !released) {
+                self.workspace.sidebar_drag = None;
+                self.workspace.sidebar_owner = None;
+            }
+        }
+        let blocked = !ui.is_enabled()
+            || !focused
+            || self.shortcut_blocking_layer_active()
+            || self.top_shortcut_modal().is_some()
+            || ctx.any_popup_open()
+            || self.workspace.cancel_pointer_gesture;
+        // A modal/popup owns Escape even while an older sidebar pointer is held.
+        let escape = !blocked
+            && self.workspace.sidebar_owner.is_some()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if blocked || escape {
+            if self.workspace.sidebar_owner.is_some() {
+                // Retain a cancelled owner through every release-frame pass.
+                self.workspace.sidebar_owner = Some(Id::new("cancelled-sidebar-pointer"));
+                self.workspace.sidebar_drag = None;
+                ctx.stop_dragging();
+                self.workspace.cancel_pointer_gesture |= down;
+                self.workspace.sidebar_pointer_blocked = true;
+            }
+            return;
+        }
+        if first_pass && pressed {
+            let buttons = ctx.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            ..
+                        } => Some((*pos, *pressed)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // Do not resize from an endpoint belonging to a later gesture in
+            // the same frame. Ambiguous batches still cannot leak into editors.
+            let ordered = matches!(buttons.as_slice(), [(_, true)] | [(_, true), (_, false)]);
+            self.workspace.sidebar_owner = None;
+            self.workspace.sidebar_drag = None;
+            for (origin, pressed) in buttons {
+                if !pressed {
+                    continue;
+                }
+                for (panel, visible) in [
+                    ("browser", self.show_browser),
+                    ("inspector", self.show_inspector),
+                ] {
+                    if !visible {
+                        continue;
+                    }
+                    let panel_id = Id::new(panel);
+                    let divider = panel_id.with("__resize");
+                    let on_divider = ctx.read_response(divider).is_some_and(|response| {
+                        response.enabled() && response.rect.contains(origin)
+                    });
+                    let in_panel = egui::containers::panel::PanelState::load(ctx, panel_id)
+                        .is_some_and(|state| state.outer_rect.contains(origin));
+                    if on_divider || in_panel {
+                        self.workspace.sidebar_owner = Some(if ordered {
+                            panel_id
+                        } else {
+                            Id::new("ambiguous-sidebar-pointer")
+                        });
+                        self.workspace.sidebar_drag = (ordered && on_divider).then_some(divider);
+                        break;
+                    }
+                }
+                if self.workspace.sidebar_owner.is_some() {
+                    break;
+                }
+            }
+        }
+        self.workspace.sidebar_pointer_blocked |= self.workspace.sidebar_owner.is_some();
+        if let Some(id) = self.workspace.sidebar_drag {
+            self.workspace.sidebar_pointer_blocked = true;
+            // The native Panel owns width clamping and persistence. A complete
+            // batch needs drag_stopped, never a phantom held drag after release.
+            // Reapply each layout pass, retaining suppression for the whole frame.
+            ctx.set_dragged_id(id);
+            if !down {
+                ctx.stop_dragging();
+            }
+        }
+    }
+
+    pub(super) fn sidebar_pointer_active(&self) -> bool {
+        self.workspace.sidebar_pointer_blocked
+    }
+
+    pub(super) fn sidebar_content_blocked(&self, panel: &str) -> bool {
+        self.sidebar_pointer_active()
+            && (self.workspace.sidebar_drag.is_some()
+                || self.workspace.sidebar_owner != Some(Id::new(panel)))
+    }
+
     pub(super) fn piano_pointer_blocked(&self) -> bool {
-        self.workspace.cancel_pointer_gesture || self.workspace.chrome_gesture.is_some()
+        self.workspace.cancel_pointer_gesture
+            || self.workspace.chrome_gesture.is_some()
+            || self.sidebar_pointer_active()
     }
 
     pub(super) fn editor_pointer_gesture_active(&self) -> bool {
         self.workspace.pointer_dragging || self.workspace.cancel_pointer_gesture
     }
 
+    pub(super) fn editor_pointer_cancellation_active(&self) -> bool {
+        self.workspace.cancel_pointer_gesture
+    }
+
     fn editor_drag_in_progress(&self, ctx: &egui::Context) -> bool {
+        if self.sidebar_pointer_active() {
+            return false;
+        }
         ctx.dragged_id()
             .and_then(|id| ctx.read_response(id))
             .is_some_and(|response| {
@@ -494,48 +762,16 @@ impl CitrusApp {
             }
         }
         self.workspace.pointer_dragging = self.editor_drag_in_progress(ui.ctx());
-        let mut enabled = !interrupted && !blocked;
+        let mut enabled = !interrupted && !blocked && !self.sidebar_pointer_active();
         if !enabled {
             ui.disable();
         }
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("WORKSPACE").size(9.0).color(theme::MUTED))
-                .on_hover_text("Drag title bars or resize window edges. Release within 8 points of a workspace or window edge to align. Hold Alt to release without snapping.");
-            if ui.studio_small_button("Arrange windows").clicked() {
-                self.arrange_editors(false);
-            }
-            if ui.studio_small_button("Cascade windows").clicked() {
-                self.arrange_editors(true);
-            }
-            let any_visible = self.workspace.windows.iter().any(|window| window.visible);
-            if ui
-                .add_enabled(
-                    any_visible,
-                    theme::Button::new(if self.workspace.maximized {
-                        "Restore windows"
-                    } else {
-                        "Maximize editor"
-                    })
-                    .small(),
-                )
-                .clicked()
-            {
-                self.finish_editor_interaction();
-                self.workspace.maximized = !self.workspace.maximized;
-                self.workspace.dirty = true;
-                self.workspace.restore_order_cursor = 0;
-                self.workspace.raise_focused = 2;
-            }
-            if ui
-                .add_enabled(any_visible, theme::Button::new("Hide editor").small())
-                .clicked()
-            {
-                self.hide_editor(self.workspace.focused);
-            }
-        });
         let bounds = ui.available_rect_before_wrap().shrink(3.0);
 
-        if !enabled {
+        // Suppression of editor input is not an interruption of the sidebar's
+        // own Gain/Fade transaction. Only real cancellation/modal barriers finish
+        // musical gestures here; Inspector sliders retain one edit until release.
+        if interrupted || blocked {
             self.cancel_piano_range_gesture(ui.ctx());
             ui.ctx().data_mut(|data| {
                 data.remove::<PianoNoteResizeGesture>(Id::new("piano-note-resize-gesture"));
@@ -545,7 +781,27 @@ impl CitrusApp {
             self.finish_piano_roll_gesture();
         }
         if self.workspace.maximized {
-            ui.add_enabled_ui(enabled, |ui| self.render_editor(ui, self.workspace.focused));
+            let view = self.workspace.focused;
+            // Sidebar resize handles extend into the center panel. Keep the
+            // maximized canvas out of that small strip; otherwise its later
+            // click-and-drag widget steals the Inspector divider's press.
+            let inset = ui.style().interaction.resize_grab_radius_side + 1.0;
+            let mut content = ui.available_rect_before_wrap();
+            if self.show_browser {
+                content.min.x += inset;
+            }
+            if self.show_inspector {
+                content.max.x -= inset;
+            }
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+                ui.shrink_clip_rect(content);
+                ui.add_enabled_ui(enabled, |ui| self.render_editor(ui, view));
+            });
+            if std::mem::take(&mut self.workspace.restore_requested) && enabled {
+                self.toggle_editor_maximized(view);
+                ui.ctx().stop_dragging();
+                ui.ctx().request_repaint();
+            }
             return;
         }
         ui.painter().text(
@@ -567,9 +823,15 @@ impl CitrusApp {
         if bounds_changed
             && self.workspace.bounds.is_some()
             && ctx.input(|input| input.pointer.primary_down())
+            && (self.editor_drag_in_progress(&ctx)
+                || self.playlist_gesture_before.is_some()
+                || self.piano_roll_gesture_before.is_some()
+                || piano_mouse::active(&ctx)
+                || piano_range::active(&ctx))
         {
-            // Resizing the desktop or toggling a side panel must not resume a stale
-            // window/note drag against a different coordinate system.
+            // Cancel only editor-owned gestures invalidated by the new coordinate
+            // system. A sidebar's own resize changes these bounds on every held
+            // frame and must survive through release so egui saves its new width.
             self.finish_editor_interaction();
             self.workspace.cancel_pointer_gesture = true;
             ctx.stop_dragging();
@@ -617,6 +879,7 @@ impl CitrusApp {
             self.workspace.pending_rects = [None; 4];
         }
         let order = self.workspace.order;
+        let mut maximize = None;
         for view in order {
             if !self.workspace.windows[index(view)].visible {
                 continue;
@@ -647,43 +910,53 @@ impl CitrusApp {
                 ),
                 StudioView::Mixer => "Insert routing & effects".to_owned(),
             };
-            let mut window = egui::Window::new(
+            let mut heading = egui::Atoms::new(
                 RichText::new(format!("{}   ·   {context}", title(view)))
-                    .size(12.0)
-                    .strong(),
-            )
-            .id(window_id(view))
-            .open(&mut open)
-            .enabled(enabled && self.top_shortcut_modal().is_none())
-            .interactable(enabled && self.top_shortcut_modal().is_none())
-            .collapsible(false)
-            .drag_area(egui::WindowDrag::TitleBar)
-            .fade_in(false)
-            .fade_out(false)
-            .default_rect(rect)
-            .min_size(minimum(view).min(bounds.size()))
-            .max_size(bounds.size())
-            .constrain_to(bounds)
-            .frame(
-                egui::Frame::window(ui.style())
-                    .inner_margin(egui::Margin::symmetric(2, 1))
-                    .corner_radius(4)
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 3],
-                        blur: 12,
-                        spread: 0,
-                        color: Color32::from_black_alpha(110),
-                    })
-                    .fill(theme::PANEL)
-                    .stroke(Stroke::new(
-                        1.0,
-                        if self.workspace.focused == view {
-                            theme::HIGHLIGHT
-                        } else {
-                            theme::GRID
-                        },
-                    )),
+                    .size(11.5)
+                    .color(if self.workspace.focused == view {
+                        theme::TEXT
+                    } else {
+                        theme::MUTED
+                    }),
             );
+            // Reserve text width for the title-bar action even with long context names.
+            heading.push_right(egui::Atom::custom(
+                window_id(view).with("maximize-space"),
+                Vec2::new(26.0, 0.0),
+            ));
+            let mut window = egui::Window::new(heading)
+                .id(window_id(view))
+                .open(&mut open)
+                .enabled(enabled && self.top_shortcut_modal().is_none())
+                .interactable(enabled && self.top_shortcut_modal().is_none())
+                .collapsible(false)
+                .drag_area(egui::WindowDrag::TitleBar)
+                .fade_in(false)
+                .fade_out(false)
+                .default_rect(rect)
+                .min_size(minimum(view).min(bounds.size()))
+                .max_size(bounds.size())
+                .constrain_to(bounds)
+                .frame(
+                    egui::Frame::window(ui.style())
+                        .inner_margin(egui::Margin::symmetric(2, 1))
+                        .corner_radius(3)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 2],
+                            blur: 8,
+                            spread: 0,
+                            color: Color32::from_black_alpha(80),
+                        })
+                        .fill(theme::PANEL)
+                        .stroke(Stroke::new(
+                            1.0,
+                            if self.workspace.focused == view {
+                                theme::HIGHLIGHT
+                            } else {
+                                theme::GRID
+                            },
+                        )),
+                );
             if reset || pending.is_some() {
                 // The target is already bounded. Native Area constraint uses its previous
                 // size before Resize applies the new one; on reset that can shift an
@@ -691,6 +964,13 @@ impl CitrusApp {
                 window = window.fixed_rect(rect).constrain(false);
             }
             let shown = window.show(&ctx, |ui| {
+                let maximize_clicked = maximize_button(ui, view);
+                if enabled
+                    && (maximize_clicked
+                        || title_response(&ctx, view).is_some_and(|title| title.double_clicked()))
+                {
+                    maximize = Some(view);
+                }
                 // Each editor is rendered exactly once with its own stable ID namespace.
                 ui.push_id(("editor-content", index(view)), |ui| {
                     self.render_editor(ui, view)
@@ -706,6 +986,12 @@ impl CitrusApp {
             if !open {
                 self.hide_editor(view);
             }
+        }
+        if let Some(view) = maximize {
+            self.toggle_editor_maximized(view);
+            ctx.stop_dragging();
+            ctx.request_repaint();
+            return;
         }
         if enabled
             && ctx.input(|input| input.pointer.primary_released())

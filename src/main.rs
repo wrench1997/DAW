@@ -44,6 +44,7 @@ mod project_media;
 mod realtime_test_alloc;
 pub mod recording;
 mod sample_browser;
+mod sampler;
 mod settings_ui;
 pub mod tempo_map;
 mod theme;
@@ -104,3 +105,6 @@ fn citrus_icon() -> egui::IconData {
         height: SIZE,
     }
 }
+
+#[cfg(test)]
+mod sampler_project_tests;

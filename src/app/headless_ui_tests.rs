@@ -10,6 +10,7 @@ struct UiHarness {
     app: Box<CitrusApp>,
     frame: eframe::Frame,
     nodes: Vec<Node>,
+    node_ids: Vec<egui::accesskit::NodeId>,
     time: f64,
     size: Vec2,
     capture: Option<super::headless_ui_capture::OffscreenCapture>,
@@ -44,6 +45,7 @@ impl UiHarness {
             app,
             frame: eframe::Frame::_new_kittest(),
             nodes: Vec::new(),
+            node_ids: Vec::new(),
             time: 0.0,
             size: egui::vec2(1440.0, 900.0),
             capture: super::headless_ui_capture::OffscreenCapture::from_env(),
@@ -79,15 +81,15 @@ impl UiHarness {
         if let Some(capture) = &mut self.capture {
             capture.process(&self.ctx, &output, self.capture_name.take());
         }
-        self.nodes = output
+        (self.node_ids, self.nodes) = output
             .platform_output
             .accesskit_update
             .as_ref()
             .expect("accessibility must be emitted by production widgets")
             .nodes
             .iter()
-            .map(|(_, node)| node.clone())
-            .collect();
+            .map(|(id, node)| (*id, node.clone()))
+            .unzip();
         assert!(
             !output.shapes.is_empty(),
             "real UI must produce paint shapes"
@@ -142,6 +144,15 @@ impl UiHarness {
             ((bounds.y0 + bounds.y1) / 2.0) as f32,
         );
         self.click_pos(pos);
+    }
+
+    fn workspace_action(&mut self, label: &str) {
+        self.click("WINDOWS");
+        self.click(label);
+        assert!(
+            !self.ctx.any_popup_open(),
+            "workspace action must close its menu"
+        );
     }
 
     fn click_pos(&mut self, pos: Pos2) {
@@ -941,6 +952,14 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
                 egui::containers::panel::PanelState::load(&ui.ctx, egui::Id::new("inspector"))
                     .unwrap()
                     .outer_rect;
+            assert!(
+                ui.ctx.content_rect().contains_rect(panel),
+                "Inspector must not grow past the viewport: {panel:?}"
+            );
+            assert!(
+                (panel.width() - width).abs() < 1.5,
+                "Inspector must retain its requested width: {panel:?}, requested {width}"
+            );
             let labels: &[&str] = if view == StudioView::ChannelRack {
                 &["REPLACE…", "EDITOR", "CLOSE EDITOR", "PARAMETERS", "REMOVE"]
             } else {
@@ -1229,9 +1248,9 @@ fn floating_workspace_drag_resize_close_reopen_and_layout_storage() {
     assert!(ui.app.workspace.windows[workspace::index(StudioView::Playlist)].visible);
     assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
     assert!((ui.editor_rect(StudioView::Playlist).width() - resized.width()).abs() < 2.0);
-    ui.click("Maximize editor");
+    ui.workspace_action("Maximize editor");
     assert!(ui.app.workspace.maximized);
-    ui.click("Restore windows");
+    ui.workspace_action("Restore windows");
     assert!(!ui.app.workspace.maximized);
     ui.capture("multiwindow-moved-resized");
 
@@ -1438,7 +1457,7 @@ fn floating_workspace_all_hidden_keeps_project_and_reopens_keyboard_target() {
     ui.app.playlist_selection_ids.insert(clip_id);
     let before = project_fingerprint(&ui.app.project);
     for _ in 0..4 {
-        ui.click("Hide editor");
+        ui.workspace_action("Hide editor");
     }
     assert!(
         ui.app
@@ -1466,11 +1485,11 @@ fn floating_workspace_all_hidden_keeps_project_and_reopens_keyboard_target() {
 #[test]
 fn floating_workspace_actual_stacking_survives_restore_and_blocked_clicks() {
     let mut ui = UiHarness::floating();
-    ui.click("Cascade windows");
+    ui.workspace_action("Cascade windows");
     ui.key(egui::Key::F7, egui::Modifiers::NONE);
-    ui.click("Maximize editor");
+    ui.workspace_action("Maximize editor");
     ui.key(egui::Key::F5, egui::Modifiers::NONE);
-    ui.click("Restore windows");
+    ui.workspace_action("Restore windows");
     for _ in 0..8 {
         ui.run(Vec::new());
     }
@@ -1494,8 +1513,8 @@ fn floating_workspace_actual_stacking_survives_restore_and_blocked_clicks() {
         ui.ctx.layer_id_at(overlap.center()).unwrap().id,
         workspace::window_id(StudioView::Playlist)
     );
-    ui.click("Arrange windows");
-    ui.click("Cascade windows");
+    ui.workspace_action("Arrange windows");
+    ui.workspace_action("Cascade windows");
     for _ in 0..8 {
         ui.run(Vec::new());
     }
@@ -1700,7 +1719,7 @@ fn floating_workspace_hide_separates_rack_and_mixer_undo_transactions() {
     ui.click(&format!("{} step 1", channel));
     let rack_edit = project_fingerprint(&ui.app.project);
     assert_ne!(rack_edit, original);
-    ui.click("Hide editor");
+    ui.workspace_action("Hide editor");
     ui.key(egui::Key::F9, egui::Modifiers::NONE);
     let mixer = ui.editor_rect(StudioView::Mixer);
     let node = ui
@@ -2063,7 +2082,7 @@ fn piano_clipboard_focus_text_modal_and_hidden_editors_do_not_leak_actions() {
     assert_eq!(ui.app.piano_roll_state.selection_ids, selected);
     ui.click_pos(ui.editor_rect(StudioView::PianoRoll).left_top() + Vec2::new(100.0, 13.0));
     for _ in 0..4 {
-        ui.click("Hide editor");
+        ui.workspace_action("Hide editor");
     }
     ui.run(vec![egui::Event::Paste(text)]);
     assert_eq!(project_fingerprint(&ui.app.project), before);
@@ -2353,13 +2372,17 @@ fn compact_workspace_native_motion_is_continuous_and_snaps_only_on_release() {
     let mut ui = UiHarness::floating();
     let project = project_fingerprint(&ui.app.project);
     let view = StudioView::Playlist;
-    let input = Rect::from_min_size(Pos2::new(120.0, 80.0), Vec2::new(600.0, 360.0));
-    ui.arrange_test_windows(&[(view, input)], view);
-    let before = ui.editor_rect(view);
-    let origin = before.left_top() + Vec2::new(110.0, 13.0);
     let pixel = 1.0 / ui.ctx.pixels_per_point();
     let warm = 12.0 * pixel;
     let increment = 4.0 * pixel;
+    // Leave a real five-point magnetic gap at the end of the held motion,
+    // independently of the default zoom/pixel density. Reaching zero cannot
+    // distinguish continuous movement from premature snapping.
+    let initial_gap = warm + 27.0 * increment + 5.0;
+    let input = Rect::from_min_size(Pos2::new(initial_gap, 80.0), Vec2::new(600.0, 360.0));
+    ui.arrange_test_windows(&[(view, input)], view);
+    let before = ui.editor_rect(view);
+    let origin = before.left_top() + Vec2::new(110.0, 13.0);
     ui.run(mixer_pointer_button(origin, true));
     // Cross egui's six-point click/drag slop once, then measure every held update.
     ui.run(vec![egui::Event::PointerMoved(
@@ -2596,8 +2619,8 @@ fn compact_workspace_default_and_repeated_arrange_use_the_available_desktop() {
         .map(|view| ui.editor_rect(view))
         .collect();
     for _ in 0..10 {
-        ui.click("Cascade windows");
-        ui.click("Arrange windows");
+        ui.workspace_action("Cascade windows");
+        ui.workspace_action("Arrange windows");
         for (i, view) in workspace::EDITORS.into_iter().enumerate() {
             let actual = ui.editor_rect(view);
             assert!((actual.min - original[i].min).length() < 1.0);
@@ -2620,7 +2643,7 @@ fn compact_workspace_default_and_repeated_arrange_use_the_available_desktop() {
     ui.capture("compact-workspace-arranged");
     ui.size = Vec2::new(1080.0, 680.0);
     ui.settle();
-    ui.click("Arrange windows");
+    ui.workspace_action("Arrange windows");
     for view in workspace::EDITORS {
         assert!(
             ui.app
@@ -2702,8 +2725,14 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
 }
 
 include!("piano_keyboard_tests.rs");
+#[path = "automation_draw_ui_tests.rs"]
+mod automation_draw_ui_tests;
 #[path = "automation_shapes_ui_tests.rs"]
 mod automation_shapes_ui_tests;
+#[path = "clip_control_capabilities_ui_tests.rs"]
+mod clip_control_capabilities_ui_tests;
+#[path = "clip_control_lifecycle_ui_tests.rs"]
+mod clip_control_lifecycle_ui_tests;
 #[path = "editor_navigation_tests.rs"]
 mod editor_navigation_tests;
 #[path = "keyboard_audition_ui_tests.rs"]
@@ -2728,6 +2757,8 @@ mod piano_keyboard_ui_tests;
 mod piano_mouse_tests;
 #[path = "play_startup_ui_tests.rs"]
 mod play_startup_ui_tests;
+#[path = "playlist_deletion_ui_tests.rs"]
+mod playlist_deletion_ui_tests;
 #[path = "playlist_transport_tests.rs"]
 mod playlist_transport_tests;
 #[path = "project_save_name_tests.rs"]
@@ -4621,7 +4652,8 @@ fn plugin_config_pending_shortcuts_preserve_project_and_escape_cancels() {
                 ..Default::default()
             },
             |_| {
-                ui.app.handle_shortcuts(&ctx, None, false);
+                ui.app
+                    .handle_shortcuts(&ctx, None, false, TransportSpaceInput::default());
             },
         );
         assert_eq!(project_fingerprint(&ui.app.project), before);
@@ -4641,7 +4673,8 @@ fn plugin_config_pending_shortcuts_preserve_project_and_escape_cancels() {
             ..Default::default()
         },
         |_| {
-            ui.app.handle_shortcuts(&ctx, None, false);
+            ui.app
+                .handle_shortcuts(&ctx, None, false, TransportSpaceInput::default());
         },
     );
     assert!(ui.app.pending_plugin_slot_config.is_none());
@@ -5419,7 +5452,7 @@ fn automation_tension_visibility_and_clipped_midpoint_alignment() {
         .set_curve(AutomationCurve::Tension);
     ui.app.tool_mode = ToolMode::Draw;
     ui.settle();
-    assert!(automation_tension_position(&ui, 1).is_none());
+    assert!(automation_tension_position(&ui, 1).is_some());
     ui.app.tool_mode = ToolMode::Select;
     ui.app.playlist_selection_ids.clear();
     ui.app.selected_clip = None;
@@ -5476,3 +5509,19 @@ fn automation_tension_visibility_and_clipped_midpoint_alignment() {
     ui.settle();
     assert!(automation_tension_position(&ui, 1).is_none());
 }
+
+#[path = "creation_chain_tests.rs"]
+mod creation_chain_tests;
+include!("workstation_visual_refresh_ui_tests.rs");
+
+#[path = "narrow_inspector_ui_tests.rs"]
+mod narrow_inspector_ui_tests;
+include!("workspace_maximize_ui_tests.rs");
+
+include!("workspace_sidebar_ui_tests.rs");
+
+include!("workspace_sidebar_press_ui_tests.rs");
+
+#[path = "sampler_editor_ui_tests.rs"]
+mod sampler_editor_ui_tests;
+include!("piano_ghost_tests.rs");

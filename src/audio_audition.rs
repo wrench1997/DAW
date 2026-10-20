@@ -280,13 +280,27 @@ impl DspState {
             return;
         }
         let accepted = match token.destination {
-            AuditionDestination::Native { mixer_track, .. } => {
+            AuditionDestination::Native {
+                channel_id,
+                mixer_track,
+            } => {
+                let Ok(sampler) = self.prepare_sampler_voice(channel_id, token.note, velocity)
+                else {
+                    self.audition_receipts
+                        .publish(token, AuditionStatus::Rejected);
+                    return;
+                };
                 if let Some(voice_index) = self.voices.iter().position(|voice| !voice.active) {
                     let frequency = 440.0 * 2.0_f32.powf((token.note as f32 - 69.0) / 12.0);
                     self.voices[voice_index] = Voice {
+                        sampler,
                         phase: 0.0,
                         phase_step: frequency / self.sample_rate,
-                        envelope: velocity.min(1.0) * 0.28,
+                        envelope: if sampler.is_some() {
+                            1.0
+                        } else {
+                            velocity.min(1.0) * 0.28
+                        },
                         decay: 1.0,
                         active: true,
                         mixer_track: mixer_track.min(TRACK_COUNT - 1),
@@ -406,7 +420,11 @@ impl DspState {
                 AuditionDestination::Native { .. } => {
                     for voice in &mut self.voices {
                         if voice.audition_token_id == Some(token.id) {
-                            voice.decay = 0.995;
+                            if let Some((_, sampler)) = &mut voice.sampler {
+                                sampler.release();
+                            } else {
+                                voice.decay = 0.995;
+                            }
                         }
                     }
                     true
@@ -542,7 +560,13 @@ impl DspState {
         (0..MAX_VOICES)
             .map(|offset| (self.next_voice + offset) % MAX_VOICES)
             .find(|index| {
-                self.voices[*index].audition_token_id.is_none() || self.voices[*index].decay < 1.0
+                let voice = &self.voices[*index];
+                !voice.active
+                    || voice.audition_token_id.is_none()
+                    || voice.decay < 1.0
+                    || voice
+                        .sampler
+                        .is_some_and(|(_, sampler)| sampler.is_releasing())
             })
             .expect("bounded auditions leave at least one native timeline voice")
     }

@@ -296,7 +296,7 @@ fn follow_extent_and_manual_song_cutoff_preserve_slip_gain_and_mute() {
 }
 
 #[test]
-fn format_fourteen_round_trip_preserves_policies_exact_audio_and_opaque_state() {
+fn current_format_round_trip_preserves_v14_policies_exact_audio_and_opaque_state() {
     let directory = PrivateDirectory::new();
     let source = directory.0.join("source.citrus");
     let copy = directory.0.join("copy.citrus");
@@ -400,7 +400,7 @@ fn format_fourteen_round_trip_preserves_policies_exact_audio_and_opaque_state() 
     project.save(&source).unwrap();
     let original_bytes = std::fs::read(&source).unwrap();
     let stored: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
-    assert_eq!(stored["format_version"], 14);
+    assert_eq!(stored["format_version"], CURRENT_PROJECT_FORMAT_VERSION);
     // The previous maximum-version admission alone rejects this new schema.
     assert!(stored["format_version"].as_u64().unwrap() > 13);
     assert_eq!(stored["clips"][0]["pattern_length_policy"], "follow");
@@ -434,7 +434,7 @@ fn missing_policy_in_format_thirteen_remains_legacy_manual_after_cold_open() {
     let original_bytes = serde_json::to_vec_pretty(&stored).unwrap();
     std::fs::write(&source, &original_bytes).unwrap();
     let reopened = Project::load(&source).unwrap();
-    assert_eq!(reopened.format_version, 14);
+    assert_eq!(reopened.format_version, CURRENT_PROJECT_FORMAT_VERSION);
     assert_eq!(reopened.clips[0].pattern_length_policy, None);
     assert_eq!(reopened.clip_length_beats(&reopened.clips[0]), 2.25);
     assert_eq!(

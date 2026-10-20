@@ -15,6 +15,8 @@ struct PendingAudition {
 
 #[derive(Default)]
 pub(super) struct KeyboardAuditionState {
+    #[cfg(test)]
+    requested_note: Option<(u32, u8, f32)>,
     held: Option<AuditionToken>,
     pending: Vec<PendingAudition>,
     blocked_until_release: bool,
@@ -45,6 +47,19 @@ impl CitrusApp {
         };
         if self.clip_dormant_channel_audition_refused(channel_id) {
             return Err("Undo the conversion before auditioning its retained instrument");
+        }
+        if let Some(sampler) = &channel.sampler {
+            let Some(asset_id) = sampler.asset_id else {
+                return Err("This Sampler is empty and silent. Load WAV before auditioning it");
+            };
+            if self.failed_audio_assets.contains_key(&asset_id)
+                || !self.timeline_audio_matches_desired()
+                || self.loaded_audio_assets.get(&asset_id) != Some(&asset_id)
+            {
+                return Err(
+                    "The sample is still loading or its playback configuration is not ready",
+                );
+            }
         }
         let Some(instance_id) = channel.instrument_plugin_instance_id else {
             return Ok(AuditionDestination::Native {
@@ -297,6 +312,10 @@ impl CitrusApp {
         length_beats: f32,
         mixer_track: usize,
     ) {
+        #[cfg(test)]
+        {
+            self.keyboard_audition.requested_note = Some((channel_id, note, velocity));
+        }
         let Some(snapshot) = self.audio.as_ref().map(AudioEngine::snapshot) else {
             return;
         };
@@ -312,6 +331,11 @@ impl CitrusApp {
 
     pub(super) fn keyboard_auditions_pending(&self) -> bool {
         !self.keyboard_audition.pending.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn requested_audition_note(&self) -> Option<(u32, u8, f32)> {
+        self.keyboard_audition.requested_note
     }
 
     #[cfg(test)]

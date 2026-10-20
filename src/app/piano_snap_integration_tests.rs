@@ -167,9 +167,19 @@ fn piano_range_actual_minimum_floating_window_has_usable_grid_and_controls() {
         "at least six ordinary pitch rows: {grid:?}, window {window:?}"
     );
     assert!(window.contains_rect(grid) && window.contains_rect(ruler));
+    let velocity_lane = ui
+        .ctx
+        .read_response(Id::new("piano-velocity-lane"))
+        .unwrap()
+        .rect;
     assert!(
-        grid.bottom() + 75.0 <= window.bottom(),
-        "velocity lane stays in window"
+        velocity_lane.height() >= 48.0,
+        "velocity editing retains usable height"
+    );
+    assert_eq!(velocity_lane.top(), grid.bottom());
+    assert!(
+        window.contains_rect(velocity_lane),
+        "the entire real velocity lane stays in the window: {velocity_lane:?} / {window:?}"
     );
     for id in [90_001_u64, 90_002] {
         let note = ui.ctx.read_response(Id::new(("piano-note", id))).unwrap();
@@ -179,6 +189,7 @@ fn piano_range_actual_minimum_floating_window_has_usable_grid_and_controls() {
             .read_response(Id::new(("piano-note", id)).with("velocity"))
             .unwrap();
         assert!(window.contains_rect(velocity.rect));
+        assert!(velocity_lane.contains_rect(velocity.rect));
     }
     ui.capture("piano-range-floating-480x420");
     let project = project_fingerprint(&ui.app.project);

@@ -18,6 +18,10 @@ runtime and undo history. They are not separate OS windows or a web mockup.
   maximized switches that editor; `Restore windows` restores the floating layout.
 - `Arrange windows` restores the four-window layout; `Cascade windows` provides a
   stacked alternative. Browser and Inspector remain available beside the workspace.
+- Inspector opens at every supported window width, including 1080 pixels. Sidebar
+  resizing reserves a 600-pixel editor area while Browser stays independently
+  available. Inspector visibility persists across restarts. See the
+  [narrow-window regression](qa/20261017-narrow-inspector.md).
 - Each editor has its own toolbar context. Playlist snap/tools cannot accidentally
   become Piano snap/tools just because Piano owns keyboard focus.
 - The Channel Rack has bounded horizontal/vertical scrolling for small windows;

@@ -6,17 +6,17 @@ use egui::{
 
 // A cool, layered workstation palette. Color belongs to musical content;
 // orange is reserved for selection, transport, and the Citrus identity.
-pub const BG: Color32 = Color32::from_rgb(26, 30, 36);
-pub const PANEL: Color32 = Color32::from_rgb(43, 50, 59);
-pub const PANEL_ALT: Color32 = Color32::from_rgb(51, 60, 70);
-pub const RAISED: Color32 = Color32::from_rgb(65, 77, 90);
-pub const GRID: Color32 = Color32::from_rgb(62, 73, 86);
-pub const TEXT: Color32 = Color32::from_rgb(227, 232, 236);
-pub const MUTED: Color32 = Color32::from_rgb(181, 192, 201);
-pub const ORANGE: Color32 = Color32::from_rgb(240, 164, 82);
-pub const ORANGE_DIM: Color32 = Color32::from_rgb(107, 82, 57);
-pub const WELL: Color32 = Color32::from_rgb(20, 25, 32);
-pub const HIGHLIGHT: Color32 = Color32::from_rgb(90, 106, 123);
+pub const BG: Color32 = Color32::from_rgb(25, 28, 33);
+pub const PANEL: Color32 = Color32::from_rgb(34, 38, 44);
+pub const PANEL_ALT: Color32 = Color32::from_rgb(41, 46, 53);
+pub const RAISED: Color32 = Color32::from_rgb(49, 55, 63);
+pub const GRID: Color32 = Color32::from_rgb(54, 61, 69);
+pub const TEXT: Color32 = Color32::from_rgb(229, 233, 238);
+pub const MUTED: Color32 = Color32::from_rgb(157, 167, 178);
+pub const ORANGE: Color32 = Color32::from_rgb(238, 175, 101);
+pub const ORANGE_DIM: Color32 = Color32::from_rgb(77, 62, 44);
+pub const WELL: Color32 = Color32::from_rgb(21, 24, 29);
+pub const HIGHLIGHT: Color32 = Color32::from_rgb(70, 80, 92);
 pub const GREEN: Color32 = Color32::from_rgb(96, 211, 177);
 pub const RED: Color32 = Color32::from_rgb(244, 92, 106);
 pub const BLUE: Color32 = Color32::from_rgb(103, 161, 255);
@@ -51,41 +51,21 @@ pub fn mix(background: Color32, foreground: Color32, amount: f32) -> Color32 {
     )
 }
 
-/// A raised face at rest and an inset face while held. Hit bounds remain fixed.
-pub fn button_face(rect: egui::Rect, fill: Color32, depressed: bool, focused: bool) -> egui::Shape {
-    let face = if depressed { rect.shrink(0.5) } else { rect };
-    let top = if depressed {
-        WELL
-    } else {
-        mix(fill, Color32::WHITE, 0.17)
-    };
-    let bottom = if depressed {
-        mix(fill, Color32::WHITE, 0.10)
-    } else {
-        WELL
-    };
+/// Flat workstation controls: tone establishes grouping; a border is reserved for focus.
+/// The hit rectangle never changes between rest, hover, press, and keyboard focus.
+pub fn button_face(
+    rect: egui::Rect,
+    fill: Color32,
+    _depressed: bool,
+    focused: bool,
+) -> egui::Shape {
     egui::Shape::Vec(vec![
-        egui::Shape::rect_filled(face, 3, fill),
-        egui::Shape::rect_stroke(face, 3, Stroke::new(1.0, WELL), egui::StrokeKind::Inside),
-        egui::Shape::line_segment(
-            [
-                face.left_top() + egui::vec2(3.0, 1.0),
-                face.right_top() + egui::vec2(-3.0, 1.0),
-            ],
-            Stroke::new(1.0, top),
-        ),
-        egui::Shape::line_segment(
-            [
-                face.left_bottom() + egui::vec2(3.0, -1.0),
-                face.right_bottom() + egui::vec2(-3.0, -1.0),
-            ],
-            Stroke::new(1.0, bottom),
-        ),
+        egui::Shape::rect_filled(rect, 3, fill),
         if focused {
             egui::Shape::rect_stroke(
-                rect.shrink(1.0),
+                rect.shrink(0.5),
                 3,
-                Stroke::new(1.0, ORANGE),
+                Stroke::new(1.5, ORANGE),
                 egui::StrokeKind::Inside,
             )
         } else {
@@ -95,7 +75,7 @@ pub fn button_face(rect: egui::Rect, fill: Color32, depressed: bool, focused: bo
 }
 
 /// Keep egui's native accessibility, keyboard activation, sizing and click semantics.
-/// Only the face and the one-point pressed content offset are custom.
+/// Only the paint underneath the native content is custom.
 pub struct Button<'a> {
     native: egui::Button<'a>,
     selected: bool,
@@ -115,11 +95,6 @@ impl<'a> Button<'a> {
         self
     }
 
-    pub fn small(mut self) -> Self {
-        self.native = self.native.small();
-        self
-    }
-
     pub fn truncate(mut self) -> Self {
         self.native = self.native.truncate();
         self
@@ -133,7 +108,9 @@ impl egui::Widget for Button<'_> {
         let response = ui.add(self.native.fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
         if ui.is_rect_visible(response.rect) {
             let depressed = self.selected || response.is_pointer_button_down_on();
-            let fill = if depressed {
+            let fill = if self.selected {
+                ORANGE_DIM
+            } else if depressed {
                 WELL
             } else if response.hovered() {
                 HIGHLIGHT
@@ -144,18 +121,6 @@ impl egui::Widget for Button<'_> {
                 face_index,
                 button_face(response.rect, fill, depressed, response.has_focus()),
             );
-            if depressed {
-                ui.ctx().graphics_mut(|graphics| {
-                    if let Some(list) = graphics.get_mut(ui.layer_id()) {
-                        let end = list.all_entries().len();
-                        for index in face_index.0 + 1..end {
-                            list.mutate_shape(egui::layers::ShapeIdx(index), |shape| {
-                                shape.shape.translate(egui::vec2(0.0, 1.0));
-                            });
-                        }
-                    }
-                });
-            }
         }
         response
     }
@@ -163,16 +128,11 @@ impl egui::Widget for Button<'_> {
 
 pub trait UiButtons {
     fn studio_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response;
-    fn studio_small_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response;
 }
 
 impl UiButtons for egui::Ui {
     fn studio_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response {
         self.add(Button::new(atoms))
-    }
-
-    fn studio_small_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response {
-        self.add(Button::new(atoms).small())
     }
 }
 
@@ -204,24 +164,25 @@ fn relative_luminance(color: Color32) -> f32 {
 pub fn install(ctx: &egui::Context) {
     install_system_fonts(ctx);
     ctx.set_theme(egui::Theme::Dark);
-    ctx.set_zoom_factor(1.04);
+    ctx.set_zoom_factor(1.0);
     let mut visuals = Visuals::dark();
     visuals.panel_fill = PANEL;
     visuals.window_fill = PANEL;
     visuals.extreme_bg_color = BG;
     visuals.faint_bg_color = PANEL_ALT;
     visuals.override_text_color = Some(TEXT);
-    visuals.window_stroke = Stroke::new(1.0, HIGHLIGHT);
+    visuals.window_stroke = Stroke::new(1.0, GRID);
+    visuals.window_corner_radius = egui::CornerRadius::same(4);
     visuals.widgets.noninteractive.bg_fill = PANEL_ALT;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, PANEL_ALT);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, GRID);
     visuals.widgets.inactive.bg_fill = RAISED;
     visuals.widgets.inactive.weak_bg_fill = PANEL_ALT;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, WELL);
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.hovered.bg_fill = HIGHLIGHT;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, HIGHLIGHT);
+    visuals.widgets.hovered.bg_stroke = Stroke::NONE;
     visuals.widgets.active.bg_fill = WELL;
     visuals.widgets.active.weak_bg_fill = WELL;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, HIGHLIGHT);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, ORANGE);
     visuals.selection.bg_fill = ORANGE_DIM;
     visuals.selection.stroke = Stroke::new(1.0, ORANGE);
 
@@ -229,14 +190,14 @@ pub fn install(ctx: &egui::Context) {
         visuals,
         ..Default::default()
     };
-    style.spacing.item_spacing = egui::vec2(6.0, 5.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(5.0, 4.0);
+    style.spacing.button_padding = egui::vec2(7.0, 3.0);
     style.spacing.slider_width = 104.0;
     style.spacing.interact_size.y = 25.0;
     style.text_styles = [
         (
             TextStyle::Heading,
-            FontId::new(21.0, FontFamily::Proportional),
+            FontId::new(18.0, FontFamily::Proportional),
         ),
         (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
@@ -286,6 +247,22 @@ fn install_system_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphite_text_and_focus_keep_a_readable_visual_hierarchy() {
+        for background in [BG, PANEL, PANEL_ALT, WELL] {
+            let contrast =
+                (relative_luminance(MUTED) + 0.05) / (relative_luminance(background) + 0.05);
+            assert!(contrast >= 4.5, "secondary text contrast {contrast}");
+        }
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(28.0, 28.0));
+        let egui::Shape::Vec(shapes) = button_face(rect, PANEL, false, true) else {
+            panic!("button paint must retain its independent focus layer");
+        };
+        assert!(shapes.iter().any(|shape| matches!(shape,
+            egui::Shape::Rect(face) if face.stroke.color == ORANGE && face.stroke.width >= 1.0
+        )));
+    }
 
     #[test]
     fn clip_title_contrast_survives_bright_custom_colors() {

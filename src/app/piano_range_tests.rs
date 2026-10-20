@@ -450,7 +450,7 @@ fn piano_range_interruptions_restore_preview_and_held_pointer_never_resumes() {
 fn piano_range_covered_window_never_claims_a_frontmost_pointer_drag() {
     let mut ui = fixture();
     let notes = serde_json::to_value(&ui.app.project.active_pattern().notes).unwrap();
-    ui.click("Cascade windows");
+    ui.workspace_action("Cascade windows");
     ui.key(egui::Key::F5, egui::Modifiers::NONE);
     let ruler_rect = ui
         .ctx
@@ -742,7 +742,7 @@ fn piano_snap_triplet_paint_and_pointer_agree_across_zoom_and_late_horizon() {
 fn piano_range_triplet_wide_and_minimum_layouts_keep_controls_on_screen() {
     let mut ui = fixture();
     ui.app.piano_roll_state.local_snap = PianoSnap::SixthBeat;
-    ui.click("Maximize editor");
+    ui.workspace_action("Maximize editor");
     ui.settle();
     set_range(&mut ui, 1.0 / 3.0, 4.0 / 3.0);
     assert_range(&ui, 1.0 / 3.0, 4.0 / 3.0);

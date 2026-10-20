@@ -22,6 +22,7 @@ use crate::{
         MixerTrackId, compile_mixer_graph,
     },
     model::{AudioAsset, Channel, Clip, ClipKind, Pattern, Project},
+    sampler::{SamplerConfig, SamplerVoice},
     tempo_map::TempoMap,
     wav,
 };
@@ -41,6 +42,9 @@ mod master_mute_tests;
 #[cfg(windows)]
 #[path = "export_native_file.rs"]
 pub(crate) mod native_file;
+#[cfg(test)]
+#[path = "export_sampler_tests.rs"]
+mod sampler_tests;
 #[cfg(test)]
 #[path = "export_workflow_tests.rs"]
 mod workflow_tests;
@@ -62,6 +66,9 @@ enum Waveform {
 #[derive(Clone, Copy)]
 struct Event {
     sample: usize,
+    note: u8,
+    sampler: Option<SamplerConfig>,
+    note_off_sample: usize,
     frequency: f32,
     velocity: f32,
     duration: f32,
@@ -78,6 +85,14 @@ struct Voice {
     decay: f32,
     waveform: Waveform,
     noise: u32,
+    left_gain: f32,
+    right_gain: f32,
+}
+
+struct OfflineSamplerVoice {
+    voice: SamplerVoice,
+    asset_id: u64,
+    note_off_sample: Option<usize>,
     left_gain: f32,
     right_gain: f32,
 }
@@ -713,11 +728,13 @@ pub fn render_project_wav_with_options(
     control.checkpoint(1000)?;
     let mut events = collect_events_controlled(project, &mixer_plan, &tempo_map, control)?;
     events.sort_by_key(|event| event.sample);
+    let sampler_assets = prepare_sampler_assets(project, &events, control)?;
 
     control.checkpoint(1200)?;
     let mut stereo = allocate_render_buffer(frame_count, sample_rate)?;
     control.checkpoint(1500)?;
     let mut voices = Vec::<Voice>::with_capacity(96);
+    let mut sampler_voices = Vec::<OfflineSamplerVoice>::with_capacity(96);
     let mut next_event = 0;
     for (frame, output) in stereo.iter_mut().enumerate() {
         if frame % PROGRESS_FRAME_INTERVAL == 0 {
@@ -730,6 +747,36 @@ pub fn render_project_wav_with_options(
             && events[next_event].sample <= frame
         {
             let event = events[next_event];
+            if let Some(config) = event.sampler {
+                let Some(asset_id) = config.asset_id else {
+                    next_event += 1;
+                    continue;
+                };
+                let asset = &sampler_assets[&asset_id];
+                let voice = SamplerVoice::new(
+                    config,
+                    event.note,
+                    event.velocity,
+                    asset.metadata.sample_rate,
+                    sample_rate,
+                    asset.frame_count(),
+                )
+                .with_context(|| {
+                    format!(
+                        "Invalid sampler configuration for audio asset {} at output frame {}",
+                        asset_id, event.sample
+                    )
+                })?;
+                sampler_voices.push(OfflineSamplerVoice {
+                    voice,
+                    asset_id,
+                    note_off_sample: Some(event.note_off_sample.min(music_frames)),
+                    left_gain: event.left_gain,
+                    right_gain: event.right_gain,
+                });
+                next_event += 1;
+                continue;
+            }
             let duration_samples = (event.duration * sample_rate as f32).max(1.0);
             voices.push(Voice {
                 phase: 0.0,
@@ -776,6 +823,21 @@ pub fn render_project_wav_with_options(
         voices.retain(|voice| voice.envelope > 0.0001);
         output.left += left * 0.24;
         output.right += right * 0.24;
+        // Sampler PCM already carries its own velocity/ADSR. Apply the
+        // channel/clip/mixer transfer once, without oscillator attenuation.
+        for voice in &mut sampler_voices {
+            if voice.note_off_sample.is_some_and(|stop| frame >= stop) {
+                voice.voice.release();
+                voice.note_off_sample = None;
+            }
+            let asset = &sampler_assets[&voice.asset_id];
+            let [left, right] = voice
+                .voice
+                .next_frame(&asset.samples, usize::from(asset.metadata.channels));
+            output.left += left * voice.left_gain;
+            output.right += right * voice.right_gain;
+        }
+        sampler_voices.retain(|voice| voice.voice.is_active());
     }
 
     control.checkpoint(5000)?;
@@ -786,8 +848,9 @@ pub fn render_project_wav_with_options(
     // not contribute to the same peak.
     drop(audio_clips);
     drop(audio_assets);
+    drop(sampler_assets);
     master_controls.apply_all(&mut stereo, control)?;
-    let tail_limit_reached = !voices.is_empty();
+    let tail_limit_reached = !voices.is_empty() || !sampler_voices.is_empty();
 
     let mut peak = 0.0_f32;
     for (index, frame) in stereo.iter().enumerate() {
@@ -909,6 +972,7 @@ fn collect_pattern_events(
             .get(channel_index)
             .copied()
             .unwrap_or(60);
+        let midi = channel.sampler.map_or(midi, |sampler| sampler.root_note);
         let step_count = pattern.length_steps.clamp(1, steps.len());
         let cycle_beats = step_count as f32 * 0.25;
         let mut cycle = -source_offset.rem_euclid(cycle_beats);
@@ -924,10 +988,24 @@ fn collect_pattern_events(
                 }
                 let sample = tempo_frame(tempo_map, beat)?;
                 let clip_stop = tempo_frame(tempo_map, clip_end)?;
+                let note_off_sample = tempo_frame(tempo_map, (beat + 0.25).min(clip_end))?;
+                let source_gain = channel.volume * route.gain * clip_gain;
+                let sampler_gain = if channel.sampler.is_some() {
+                    source_gain
+                } else {
+                    1.0
+                };
                 events.push(Event {
                     sample,
+                    note: midi,
+                    sampler: channel.sampler,
+                    note_off_sample,
                     frequency: midi_frequency(midi),
-                    velocity: channel.volume * route.gain * clip_gain,
+                    velocity: if channel.sampler.is_some() {
+                        1.0
+                    } else {
+                        source_gain
+                    },
                     duration: (match waveform {
                         Waveform::Kick => 0.42_f32,
                         Waveform::Noise => 0.13,
@@ -936,8 +1014,8 @@ fn collect_pattern_events(
                     })
                     .min(clip_stop.saturating_sub(sample) as f32 / tempo_map.sample_rate() as f32),
                     waveform,
-                    left_gain: route.left_gain * channel_left,
-                    right_gain: route.right_gain * channel_right,
+                    left_gain: route.left_gain * channel_left * sampler_gain,
+                    right_gain: route.right_gain * channel_right * sampler_gain,
                 });
             }
             cycle += cycle_beats;
@@ -990,14 +1068,27 @@ fn collect_pattern_events(
             let sample = tempo_frame(tempo_map, beat)?;
             let note_end = (beat + note.length).min(clip_end);
             let end_sample = tempo_frame(tempo_map, note_end)?;
+            let source_gain = channel.volume * route.gain * clip_gain;
+            let sampler_gain = if channel.sampler.is_some() {
+                source_gain
+            } else {
+                1.0
+            };
             events.push(Event {
                 sample,
+                note: note.note,
+                sampler: channel.sampler,
+                note_off_sample: end_sample,
                 frequency: midi_frequency(note.note),
-                velocity: note.velocity * channel.volume * route.gain * clip_gain * 0.55,
+                velocity: if channel.sampler.is_some() {
+                    note.velocity
+                } else {
+                    note.velocity * channel.volume * route.gain * clip_gain * 0.55
+                },
                 duration: end_sample.saturating_sub(sample) as f32 / tempo_map.sample_rate() as f32,
                 waveform: Waveform::Triangle,
-                left_gain: route.left_gain * channel_left,
-                right_gain: route.right_gain * channel_right,
+                left_gain: route.left_gain * channel_left * sampler_gain,
+                right_gain: route.right_gain * channel_right * sampler_gain,
             });
         }
         cycle += piano_period;
@@ -1012,6 +1103,53 @@ fn native_channel_audible(channel: &Channel, any_solo: bool) -> bool {
 fn pan_balance(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
     (1.0 - pan.max(0.0), 1.0 + pan.min(0.0))
+}
+
+/// Sampler trim/loop positions are native frames. Keep this decode separate
+/// from the output-rate-resampled buffers used by Playlist audio clips.
+fn prepare_sampler_assets(
+    project: &Project,
+    events: &[Event],
+    control: &ExportControl,
+) -> Result<HashMap<u64, wav::WavAsset>> {
+    let mut assets = HashMap::new();
+    for config in events.iter().filter_map(|event| event.sampler) {
+        control.check_cancelled()?;
+        let Some(asset_id) = config.asset_id else {
+            continue;
+        };
+        let Entry::Vacant(entry) = assets.entry(asset_id) else {
+            continue;
+        };
+        let asset = project
+            .audio_assets
+            .iter()
+            .find(|asset| asset.id == asset_id)
+            .with_context(|| format!("Sampler references missing audio asset {}", asset_id))?;
+        let decoded = wav::read_wav(&asset.path).with_context(|| {
+            format!(
+                "Unable to prepare sampler audio asset {} ('{}') from '{}'",
+                asset.id,
+                asset.name,
+                asset.path.display()
+            )
+        })?;
+        ensure!(
+            (1..=2).contains(&decoded.metadata.channels),
+            "sampler audio asset {} has {} channels; only mono or stereo sources are supported",
+            asset.id,
+            decoded.metadata.channels
+        );
+        ensure!(
+            decoded.metadata.sample_rate == asset.sample_rate,
+            "sampler audio asset {} changed sample rate from {} Hz to {} Hz; its native-frame trim and loop positions are no longer valid",
+            asset.id,
+            asset.sample_rate,
+            decoded.metadata.sample_rate
+        );
+        entry.insert(decoded);
+    }
+    Ok(assets)
 }
 
 fn prepare_audio_clips(

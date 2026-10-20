@@ -577,6 +577,17 @@ EVENT_QA_FILES = frozenset((
 EVENT_INVENTORY_SHA256 = "9bf3d8af3a911286a766b628f547ee4579e2d40ef582b38b6c36254d0e9b8b88"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
+    "docs/GHOST_NOTES.md", "docs/NATIVE_SAMPLER.md", "docs/SAMPLER_EDITOR.md",
+    "docs/qa/20261018-ghost-sampler-plan.md",
+    "docs/qa/20261017-automation-delete-fix.md",
+    "docs/qa/20261017-clip-control-capabilities.md",
+    "docs/qa/20261017-workstation-visual-refresh.md",
+    "docs/qa/20261017-strict-repair-integration.md",
+    "docs/qa/20261017-native-desktop-usability.md",
+    "docs/qa/20261017-narrow-inspector.md",
+    "docs/qa/20261017-automation-draw-input.md",
+    "docs/DIRECT_EDITOR_MAXIMIZE.md",
+    "docs/SIDEBAR_RESIZE_OWNERSHIP.md",
     "docs/NATIVE_CONTROL_AUTOMATION.md", "docs/DRY_GENERATOR_TOPOLOGY.md",
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
     "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md",

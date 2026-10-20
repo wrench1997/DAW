@@ -27,6 +27,7 @@ mod pattern_editor_link;
 mod pattern_length;
 mod piano_clipboard;
 mod piano_expression;
+mod piano_ghosts;
 mod piano_keyboard;
 mod piano_mouse;
 mod piano_range;
@@ -35,6 +36,7 @@ mod play_startup;
 mod playlist_transport;
 mod project_media_ui;
 mod sample_browser_ui;
+mod sampler_ui;
 mod workspace;
 mod workspace_geometry;
 
@@ -191,6 +193,10 @@ const MAX_TIMELINE_RUNTIME_EVENTS_PER_FRAME: usize = 32;
 const PLAYLIST_TRACK_COUNT: usize = 32;
 const PIANO_PITCH_COUNT: usize = 128;
 const EDITOR_MIN_VIEWPORT_PIXELS: f64 = 1.0;
+// Both sidebars remain available at the supported 1080 px window minimum.
+// Cap their resize budget rather than silently hiding an explicitly opened Inspector.
+const MIN_EDITOR_PANEL_WIDTH: f32 = 600.0;
+const MIN_INSPECTOR_WIDTH: f32 = 220.0;
 const AUDIO_PREFERENCES_STORAGE_KEY: &str = "citrus-studio/app-preferences/v1";
 const PIANO_ROLL_PREFERENCES_STORAGE_KEY: &str = "citrus-studio/piano-roll-preferences/v1";
 const TRANSPORT_MODE_STORAGE_KEY: &str = "citrus-studio/transport-mode/v1";
@@ -290,7 +296,14 @@ fn transport_playback_project(project: &Project, mode: TransportMode) -> Project
         })
         .unwrap_or_default();
     playback.automation_lanes.clear();
-    playback.audio_assets.clear();
+    let sampler_assets = playback
+        .channels
+        .iter()
+        .filter_map(|c| c.sampler.as_ref().and_then(|s| s.asset_id))
+        .collect::<HashSet<_>>();
+    playback
+        .audio_assets
+        .retain(|asset| sampler_assets.contains(&asset.id));
     playback.audio_clip_mixer_destinations.clear();
     playback.migration_diagnostics.clear();
     playback
@@ -1504,6 +1517,7 @@ fn timeline_required_audio_asset_ids(timeline: &CompiledTimeline) -> Vec<u64> {
         .audio_clips()
         .iter()
         .map(|clip| clip.asset_id)
+        .chain(timeline.sampler_asset_ids())
         .collect::<Vec<_>>();
     required.sort_unstable();
     required.dedup();
@@ -1991,6 +2005,32 @@ impl ShortcutKey {
 struct ShortcutChord {
     key: ShortcutKey,
     modifiers: ShortcutModifiers,
+}
+
+/// One frame's plain-Space owner. egui synthesizes clicks for focused widgets
+/// without consuming Space, so it must not also see the DAW's transport key.
+#[derive(Clone, Copy, Debug, Default)]
+struct TransportSpaceInput {
+    observed_plain_press: bool,
+    global_press: Option<ShortcutChord>,
+}
+
+impl TransportSpaceInput {
+    fn presses(self, ctx: &egui::Context) -> ShortcutPresses {
+        let mut presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+        if self.observed_plain_press {
+            // UI-owned Space stays UI-owned even when that text editor or popup
+            // closes in this pass. Reserved events are never replayed into egui.
+            presses.chords[ShortcutKey::Space.index()] = self.global_press;
+        }
+        presses
+    }
+}
+
+fn plain_space_press(event: &egui::Event) -> bool {
+    matches!(event, egui::Event::Key {
+        key: egui::Key::Space, pressed: true, modifiers, ..
+    } if !modifiers.any())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5153,6 +5193,7 @@ struct PianoNoteResizeGesture {
 
 pub struct CitrusApp {
     project: Project,
+    sampler_editor: sampler_ui::SamplerEditor,
     clip_render_job: Option<clip_render_job::ClipRenderJob>,
     whole_song_export_job: Option<whole_song_export_job::WholeSongExportJob>,
     whole_song_export_tail_result: Option<whole_song_export_job::WholeSongTailResult>,
@@ -5542,6 +5583,7 @@ impl CitrusApp {
             Box::new_uninit(),
             Self {
                 project,
+                sampler_editor: sampler_ui::SamplerEditor::default(),
                 workspace: workspace::Workspace::load(cc.storage),
                 transport_mode,
                 transport_mode_dirty: false,
@@ -11206,6 +11248,20 @@ impl CitrusApp {
                         due_frame: snapshot.device_frame.saturating_add(duration_frames.max(1)),
                     });
             }
+        } else if self
+            .project
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .is_some_and(|channel| channel.sampler.is_some())
+        {
+            self.trigger_channel_audition_note(
+                channel_id,
+                note,
+                velocity,
+                length_beats,
+                mixer_track,
+            );
         } else if let Some(audio) = &mut self.audio {
             audio.command(AudioCommand::NoteOn {
                 note,
@@ -11567,6 +11623,7 @@ impl CitrusApp {
     }
 
     fn undo(&mut self) {
+        self.cancel_sampler_gesture();
         if self.clip_render_reject_mutation() {
             return;
         }
@@ -11632,6 +11689,7 @@ impl CitrusApp {
     }
 
     fn redo(&mut self) {
+        self.cancel_sampler_gesture();
         if self.clip_render_reject_mutation() {
             return;
         }
@@ -12123,6 +12181,9 @@ impl CitrusApp {
         if self.clip_render_reject_mutation() {
             return;
         }
+        if self.workspace.focused == StudioView::Playlist && self.playlist_discrete_edit_blocked() {
+            return;
+        }
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
             return;
         }
@@ -12362,6 +12423,9 @@ impl CitrusApp {
         if self.clip_render_reject_mutation() {
             return;
         }
+        if self.playlist_discrete_edit_blocked() {
+            return;
+        }
         let selected = expand_clip_group_selection(
             &self.project.clips,
             &self.playlist_selection_ids,
@@ -12409,6 +12473,9 @@ impl CitrusApp {
         if self.clip_render_reject_mutation() {
             return;
         }
+        if self.playlist_discrete_edit_blocked() {
+            return;
+        }
         let selected = expand_clip_group_selection(
             &self.project.clips,
             &self.playlist_selection_ids,
@@ -12449,6 +12516,9 @@ impl CitrusApp {
     }
 
     fn crossfade_playlist_selection(&mut self) {
+        if self.playlist_discrete_edit_blocked() {
+            return;
+        }
         let edit = match create_audio_crossfade(&self.project.clips, &self.playlist_selection_ids) {
             Ok(edit) => edit,
             Err(error) => {
@@ -12502,6 +12572,12 @@ impl CitrusApp {
         {
             self.selected_clip = self.playlist_selection_ids.iter().copied().min();
         }
+    }
+
+    fn playlist_discrete_edit_blocked(&self) -> bool {
+        // Another transaction must not replace a pointer owner's Project while
+        // its pre-edit snapshot can still be committed on release.
+        self.playlist_gesture_before.is_some() || self.editor_pointer_cancellation_active()
     }
 
     fn finish_playlist_gesture(&mut self) {
@@ -12805,6 +12881,9 @@ impl CitrusApp {
         if self.clip_render_reject_mutation() {
             return;
         }
+        if self.workspace.focused == StudioView::Playlist && self.playlist_discrete_edit_blocked() {
+            return;
+        }
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
             return;
         }
@@ -12819,17 +12898,7 @@ impl CitrusApp {
                     return;
                 }
                 let mut candidate = self.project.clone();
-                candidate.clips.retain(|clip| !selected.contains(&clip.id));
-                candidate
-                    .audio_clip_mixer_destinations
-                    .retain(|destination| !selected.contains(&destination.clip_id));
-                candidate.automation_lanes.retain(|automation| {
-                    candidate
-                        .clips
-                        .iter()
-                        .any(|clip| clip.automation_id == Some(automation.id))
-                });
-                normalize_playlist_clip_groups(&mut candidate.clips);
+                candidate.delete_playlist_clips(&selected);
                 if commit_explicit_project_history_transaction(
                     &mut self.project,
                     &mut self.history_snapshot,
@@ -13540,14 +13609,70 @@ impl CitrusApp {
         ));
     }
 
+    fn reserve_transport_space(
+        &self,
+        ctx: &egui::Context,
+        modal_at_frame_start: Option<ShortcutModal>,
+        blocker_at_frame_start: bool,
+    ) -> TransportSpaceInput {
+        let (observed_plain_press, press) = ctx.input(|input| {
+            (
+                input.events.iter().any(plain_space_press),
+                ShortcutPresses::from_events(&input.events)
+                    .chord(ShortcutKey::Space)
+                    .filter(|chord| chord.modifiers.is_plain()),
+            )
+        });
+        if !observed_plain_press {
+            return TransportSpaceInput::default();
+        }
+        let context = self.shortcut_context(ctx, modal_at_frame_start, blocker_at_frame_start);
+        let chord = ShortcutChord {
+            key: ShortcutKey::Space,
+            modifiers: ShortcutModifiers::default(),
+        };
+        // Match the existing queued-save pause exception, without starting playback
+        // or accepting anything early. handle_shortcuts rechecks the live barrier.
+        let save_pause = self.playing
+            && self.save_barrier.as_ref().is_some_and(|barrier| {
+                !barrier.requests_initialized && self.plugin_state_save_transport_busy()
+            })
+            && context.top_modal.is_none()
+            && !context.text_editor_active
+            && !context.popup_open;
+        let global_owner = ctx.input(|input| input.focused)
+            && (ShortcutPolicy::new(context).resolve(chord) == Some(ShortcutAction::TogglePlay)
+                || save_pause);
+        // Settings and plug-in manager are ordinary Windows, so a previously
+        // focused toolbar/Inspector widget can still live on the background layer.
+        // While a modal owns shortcuts, that stale background focus must not turn
+        // Space into a native click. Keep focus itself for normal Tab traversal,
+        // and leave native Space inside the modal's own layer untouched.
+        let blocked_background_owner = context.top_modal.is_some()
+            && ctx
+                .memory(|memory| memory.focused())
+                .and_then(|id| ctx.read_response(id))
+                .is_some_and(|response| response.layer_id.order == egui::Order::Background);
+        if global_owner || blocked_background_owner {
+            // Strip pressed/repeated key events only. Keep Text, Enter, pointer,
+            // key release and accessibility events unchanged for their native owners.
+            ctx.input_mut(|input| input.events.retain(|event| !plain_space_press(event)));
+        }
+        TransportSpaceInput {
+            observed_plain_press,
+            global_press: if global_owner { press } else { None },
+        }
+    }
+
     fn handle_shortcuts(
         &mut self,
         ctx: &egui::Context,
         modal_at_frame_start: Option<ShortcutModal>,
         blocker_at_frame_start: bool,
+        transport_space: TransportSpaceInput,
     ) {
         if self.clip_operation_fence_active() {
-            let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+            let presses = transport_space.presses(ctx);
             if presses
                 .chord(ShortcutKey::Escape)
                 .and_then(resolve_global_shortcut)
@@ -13560,7 +13685,7 @@ impl CitrusApp {
             return;
         }
         if self.pending_plugin_slot_config.is_some() {
-            let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+            let presses = transport_space.presses(ctx);
             if presses
                 .chord(ShortcutKey::Escape)
                 .and_then(resolve_global_shortcut)
@@ -13578,10 +13703,11 @@ impl CitrusApp {
             && self.top_shortcut_modal().is_none()
             && !ctx.text_edit_focused()
             && !ctx.any_popup_open()
+            && !egui::Popup::is_any_open(ctx)
         {
             // A queued save must not trap playback behind the normal save shortcut
             // blocker. The stop controls still own their ordinary keyboard input.
-            let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+            let presses = transport_space.presses(ctx);
             if presses
                 .chord(ShortcutKey::Escape)
                 .and_then(resolve_global_shortcut)
@@ -13604,7 +13730,7 @@ impl CitrusApp {
         }
         let context = self.shortcut_context(ctx, modal_at_frame_start, blocker_at_frame_start);
         let policy = ShortcutPolicy::new(context);
-        let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+        let presses = transport_space.presses(ctx);
         if let Some(action) = policy.resolve_presses(presses) {
             self.apply_shortcut_action(ctx, action);
         }
@@ -13624,7 +13750,9 @@ impl CitrusApp {
             // Actual text/numeric editors and open popups still own keyboard
             // input so typing or choosing a menu item never starts transport.
             text_editor_active: ctx.text_edit_focused(),
-            popup_open: ctx.any_popup_open(),
+            // Painted popups cover this pass; persistent memory also covers the
+            // pre-widget boundary and menus opened before their first layout pass.
+            popup_open: ctx.any_popup_open() || egui::Popup::is_any_open(ctx),
             blocking_layer: blocker_at_frame_start || self.shortcut_blocking_layer_active(),
             top_modal: modal_at_frame_start.or_else(|| self.top_shortcut_modal()),
         }
@@ -14031,11 +14159,18 @@ impl CitrusApp {
                         if enabled && !muted {
                             scheduled_channel_notes.push((
                                 channel.id,
-                                note_map.get(index).copied().unwrap_or(60),
-                                self.runtime_channel_volumes
-                                    .get(index)
-                                    .copied()
-                                    .unwrap_or(channel.volume),
+                                sampler_ui::step_note(
+                                    channel,
+                                    note_map.get(index).copied().unwrap_or(60),
+                                ),
+                                sampler_ui::note_velocity(
+                                    channel,
+                                    1.0,
+                                    self.runtime_channel_volumes
+                                        .get(index)
+                                        .copied()
+                                        .unwrap_or(channel.volume),
+                                ),
                                 0.25,
                                 channel.mixer_track,
                             ));
@@ -14071,12 +14206,14 @@ impl CitrusApp {
                         scheduled_channel_notes.push((
                             channel.id,
                             note.note,
-                            note.velocity
-                                * self
-                                    .runtime_channel_volumes
+                            sampler_ui::note_velocity(
+                                channel,
+                                note.velocity,
+                                self.runtime_channel_volumes
                                     .get(channel_index)
                                     .copied()
                                     .unwrap_or(channel.volume),
+                            ),
                             note.length,
                             channel.mixer_track,
                         ));
@@ -15727,6 +15864,7 @@ impl CitrusApp {
     }
 
     fn request_project_intent(&mut self, intent: ProjectIntent) {
+        self.seal_sampler_for_action();
         if self.clip_render_reject_mutation() {
             return;
         }
@@ -16234,6 +16372,8 @@ impl CitrusApp {
         self.clip_restoration_playback_pending = false;
         self.clip_restoration_failed = false;
         self.piano_clipboard.clear();
+        // Pattern IDs may be reused by a newly installed project.
+        self.piano_roll_state.ghost_source = crate::piano_roll::PianoGhostSource::CurrentPattern;
         self.cached_audio_assets.clear();
         self.pending_generator_routes.clear();
         self.generator_audibility.clear();
@@ -16317,6 +16457,11 @@ impl CitrusApp {
         if announce {
             self.deferred_recovery_save_notice = Some(self.project_session);
         }
+        // A background save must not split a pointer gesture or publish its
+        // intermediate preview. Keep the recovery deadline due until release.
+        if self.playlist_gesture_before.is_some() {
+            return;
+        }
         // Native state capture shares the worker with DSP and can take much longer
         // than an audio deadline. Keep an overdue recovery save due while playing
         // or preparing; stop confirmation admits it without another 30-second wait.
@@ -16365,6 +16510,23 @@ impl CitrusApp {
     }
 
     fn begin_project_save(&mut self, request: ProjectSaveRequest) {
+        if self.sampler_gesture_active() {
+            if !request.is_manual() {
+                return;
+            }
+            self.seal_sampler_for_action();
+        }
+        if self.playlist_gesture_before.is_some() {
+            if !request.is_manual() {
+                return;
+            }
+            // A requested manual save seals the current edit before mark_saved
+            // can replace the history observer baseline. Suppress the old
+            // pointer until release, even if a device-free save finishes in
+            // the next UI frame before the ordinary save blocker is painted.
+            self.cancel_editor_pointer_until_release();
+            self.finish_playlist_gesture();
+        }
         if self.keyboard_auditions_pending() {
             self.cancel_all_keyboard_auditions();
             self.drive_owned_audition_releases();
@@ -16983,13 +17145,16 @@ impl CitrusApp {
 
     fn top_menu(&mut self, root: &mut egui::Ui) {
         egui::Panel::top("menu")
-            .exact_size(32.0)
+            .exact_size(30.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG)
                     .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(root, |ui| {
+                if self.sidebar_pointer_active() {
+                    ui.disable();
+                }
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 7.0;
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = theme::BG;
@@ -17186,6 +17351,9 @@ impl CitrusApp {
                         ui.separator();
                         self.workspace_view_menu(ui);
                     });
+                    ui.menu_button(RichText::new("WINDOWS").size(10.0), |ui| {
+                        self.workspace_view_menu(ui);
+                    });
                     ui.menu_button(RichText::new("OPTIONS").size(10.0), |ui| {
                         if ui.button("Audio & plugin settings…").clicked() {
                             ui.close();
@@ -17198,6 +17366,14 @@ impl CitrusApp {
                         );
                         ui.label(RichText::new("Native Rust DAW workstation").small());
                     });
+                    if icons::icon_button(ui, StudioIcon::Folder, false, 25.0)
+                        .on_hover_text("Open project — Ctrl+O").clicked() {
+                        self.open_project();
+                    }
+                    if icons::icon_button(ui, StudioIcon::Save, false, 25.0)
+                        .on_hover_text("Save project — Ctrl+S").clicked() {
+                        self.save_project();
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icons::icon_button(ui, StudioIcon::Settings, self.show_settings, 28.0)
                             .on_hover_text("Audio and plugin settings")
@@ -17255,24 +17431,26 @@ impl CitrusApp {
     fn toolbar(&mut self, root: &mut egui::Ui) {
         // Keep every transport and navigation action visible at the supported minimum size.
         // A second explicit row is preferable to right-aligned controls painting over siblings.
-        let compact = root.available_width() < 1380.0;
+        // PAT/SONG retain native 25-point hit heights: 51 points plus outer margins.
+        // Reserve the complete second navigation row; Panel clips at its exact bounds.
+        let compact = root.available_width() < 1180.0;
         egui::Panel::top("toolbar")
-            .exact_size(if compact { 96.0 } else { 58.0 })
+            .exact_size(if compact { 98.0 } else { 60.0 })
             .frame(
                 egui::Frame::NONE
                     .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(10, 5)),
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(root, |ui| {
+                if self.sidebar_pointer_active() {
+                    ui.disable();
+                }
                 ui.horizontal(|ui| {
                     ui.set_height(42.0);
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (icon, hint) in [
-                        (StudioIcon::Menu, "Main menu"),
-                        (StudioIcon::Undo, "Undo — history will appear here"),
-                        (StudioIcon::Redo, "Redo — history will appear here"),
-                        (StudioIcon::Folder, "Open project — Ctrl+O"),
-                        (StudioIcon::Save, "Save project — Ctrl+S"),
+                        (StudioIcon::Undo, "Undo — Ctrl+Z"),
+                        (StudioIcon::Redo, "Redo — Ctrl+Y"),
                     ] {
                         if icons::icon_button(ui, icon, false, 28.0)
                             .on_hover_text(hint)
@@ -17281,8 +17459,6 @@ impl CitrusApp {
                             match icon {
                                 StudioIcon::Undo => self.undo(),
                                 StudioIcon::Redo => self.redo(),
-                                StudioIcon::Folder => self.open_project(),
-                                StudioIcon::Save => self.save_project(),
                                 _ => {}
                             }
                         }
@@ -17377,7 +17553,7 @@ impl CitrusApp {
                     let beat = (self.beat_position % 4.0).floor() as u32 + 1;
                     let tick = ((self.beat_position % 1.0) * 96.0) as u32;
                     ui.allocate_ui_with_layout(
-                        Vec2::new(132.0, 40.0),
+                        Vec2::new(112.0, 40.0),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.label(
@@ -17388,7 +17564,7 @@ impl CitrusApp {
                             ui.label(
                                 RichText::new(format!("{bar:03}:{beat:02}:{tick:02}"))
                                     .monospace()
-                                    .size(22.0)
+                                    .size(20.0)
                                     .color(theme::TEXT),
                             );
                         },
@@ -17428,13 +17604,16 @@ impl CitrusApp {
 
     fn bottom_status(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status")
-            .exact_size(24.0)
+            .exact_size(22.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG)
                     .inner_margin(egui::Margin::symmetric(10, 0)),
             )
             .show(root, |ui| {
+                if self.sidebar_pointer_active() {
+                    ui.disable();
+                }
                 ui.horizontal_centered(|ui| {
                     let (
                         device,
@@ -17495,13 +17674,18 @@ impl CitrusApp {
                             })
                             .size(9.0),
                     );
-                    ui.label(
-                        RichText::new(format!(
-                            "{device}    {rate} Hz / {buffer}    XRUN {xruns}    queue {queue_full}    rendered {frames}"
-                        ))
-                        .size(9.5)
-                        .color(theme::MUTED),
-                    );
+                    let device_status = if self.audio.is_none() {
+                        "Audio offline".to_owned()
+                    } else if xruns != 0 || queue_full != 0 {
+                        format!("Audio · XRUN {xruns} · queue {queue_full}")
+                    } else {
+                        format!("Audio · {:.1} kHz", rate as f32 / 1000.0)
+                    };
+                    ui.label(RichText::new(device_status).size(10.0).color(
+                        if xruns != 0 || queue_full != 0 { theme::AMBER } else { theme::MUTED },
+                    )).on_hover_text(format!(
+                        "{device}\n{rate} Hz / {buffer}\nXRUN {xruns} · queue {queue_full} · rendered {frames}"
+                    ));
                     if let Some(recorder) = &self.input_recorder {
                         let status = recorder.status();
                         ui.label(
@@ -17579,18 +17763,15 @@ impl CitrusApp {
                         let desired_active = self.timeline_audio_matches_desired();
                         let callback_owned = self.callback_timeline_owns_note_clip();
                         let scheduler = if desired_active {
-                            "AUDIO TIMELINE ACTIVE"
+                            "Engine ready"
                         } else if callback_owned {
-                            "PREVIOUS AUDIO TIMELINE ACTIVE"
+                            "Previous engine active"
                         } else {
-                            "LEGACY NOTE/CLIP FALLBACK"
+                            "Safe fallback"
                         };
                         ui.label(
-                            RichText::new(format!(
-                                "TIMELINE G{generation} COMPILED · {scheduler}"
-                            ))
-                            .strong()
-                            .size(8.5)
+                            RichText::new(scheduler)
+                            .size(9.5)
                             .color(if desired_active {
                                 theme::GREEN
                             } else {
@@ -17598,7 +17779,7 @@ impl CitrusApp {
                             }),
                         )
                         .on_hover_text(format!(
-                            "{} events · {} note pairs · {} audio clips · {} automation segments · max burst {} · {} diagnostics\nControl phase: {}\nInternal/native Channel Volume/Pan/Mute are sample-exact before raw PDC; Master Volume/Pan/Mute are sample-exact after output PDC. Generator-backed Channel and remaining targets are legacy or unsupported.",
+                            "Timeline G{generation} compiled · {scheduler}\n{} events · {} note pairs · {} audio clips · {} automation segments · max burst {} · {} diagnostics\nControl phase: {}\nInternal/native Channel Volume/Pan/Mute are sample-exact before raw PDC; Master Volume/Pan/Mute are sample-exact after output PDC. Generator-backed Channel and remaining targets are legacy or unsupported.",
                             timeline.events().len(),
                             stats.note_pairs,
                             stats.audio_clips,
@@ -17609,7 +17790,7 @@ impl CitrusApp {
                         ));
                     } else if let Some(error) = &self.timeline_compile_error {
                         ui.label(
-                            RichText::new("TIMELINE COMPILE ERROR · SAFE FALLBACK")
+                            RichText::new("Engine error · safe fallback")
                                 .strong()
                                 .size(8.5)
                                 .color(theme::RED),
@@ -17617,14 +17798,13 @@ impl CitrusApp {
                         .on_hover_text(error);
                     } else {
                         ui.label(
-                            RichText::new(format!(
-                                "TIMELINE G{} COMPILING · SAFE FALLBACK",
-                                self.timeline_desired_generation
-                            ))
-                            .strong()
-                            .size(8.5)
-                            .color(theme::AMBER),
-                        );
+                            RichText::new("Engine updating")
+                            .size(9.5)
+                            .color(theme::MUTED),
+                        ).on_hover_text(format!(
+                            "Timeline G{} compiling · safe fallback until activation is confirmed",
+                            self.timeline_desired_generation
+                        ));
                     }
                     if timeline_failures != 0
                         || timeline_missing_assets != 0
@@ -17633,24 +17813,20 @@ impl CitrusApp {
                     {
                         let hard_failure = timeline_failures != 0 || timeline_missing_assets != 0;
                         ui.label(
-                            RichText::new(format!(
-                                "TL DIAG exec {timeline_failures} / assets {timeline_missing_assets} / auto pending {timeline_automation_pending} / skipped {timeline_automation_unsupported}"
-                            ))
+                            RichText::new(if hard_failure { "Audio fault" } else { "Automation warning" })
                             .strong()
                             .size(8.5)
                             .color(if hard_failure { theme::RED } else { theme::AMBER }),
                         )
-                        .on_hover_text(
-                            "Timeline callback diagnostics. Internal/native Channel Volume/Pan/Mute and Master Volume/Pan/Mute are callback-rendered; remaining targets are legacy or unsupported.",
-                        );
+                        .on_hover_text(format!(
+                            "Timeline diagnostics: execution failures {timeline_failures} · missing assets {timeline_missing_assets} · automation pending {timeline_automation_pending} · skipped {timeline_automation_unsupported}\nInternal/native Channel Volume/Pan/Mute and Master Volume/Pan/Mute are callback-rendered; remaining targets are legacy or unsupported."
+                        ));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!(
-                                "PLUG-IN {}    UI {:.1} ms / {:.0} fps",
+                                "Plug-ins · {}",
                                 self.plugin_processing_status_label(),
-                                self.frame_time_ms,
-                                1000.0 / self.frame_time_ms.max(0.1),
                             ))
                             .monospace()
                             .size(9.0)
@@ -17659,16 +17835,26 @@ impl CitrusApp {
                             } else {
                                 theme::MUTED
                             }),
-                        );
+                        ).on_hover_text(format!(
+                            "UI frame arrival: {:.1} ms / {:.0} fps. This is not audio callback or display performance.",
+                            self.frame_time_ms, 1000.0 / self.frame_time_ms.max(0.1),
+                        ));
                     });
                 });
             });
     }
 
     fn browser(&mut self, root: &mut egui::Ui) {
+        let inspector_reserve = if self.show_inspector {
+            MIN_INSPECTOR_WIDTH
+        } else {
+            0.0
+        };
+        let maximum_width = (root.available_width() - MIN_EDITOR_PANEL_WIDTH - inspector_reserve)
+            .clamp(168.0, 320.0);
         egui::Panel::left("browser")
-            .default_size(196.0)
-            .size_range(184.0..=360.0)
+            .default_size(176.0)
+            .size_range(168.0..=maximum_width)
             .resizable(true)
             .frame(
                 egui::Frame::NONE
@@ -17676,13 +17862,13 @@ impl CitrusApp {
                     .inner_margin(egui::Margin::same(8)),
             )
             .show(root, |ui| {
+                if self.sidebar_content_blocked("browser") {
+                    ui.disable();
+                }
                 ui.horizontal(|ui| {
                     let icon_rect = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover()).0;
                     icons::paint_icon(ui.painter(), icon_rect, StudioIcon::Browser, theme::MUTED);
                     ui.label(RichText::new("BROWSER").strong().size(11.5));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let _ = icons::icon_button(ui, StudioIcon::More, false, 25.0);
-                    });
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -18551,24 +18737,26 @@ impl CitrusApp {
     }
 
     fn inspector(&mut self, root: &mut egui::Ui) {
+        // Browser has already reserved this panel's minimum. Clamp remembered
+        // widths as well as active drags when the native window becomes narrower.
+        let maximum_width =
+            (root.available_width() - MIN_EDITOR_PANEL_WIDTH).clamp(MIN_INSPECTOR_WIDTH, 340.0);
         egui::Panel::right("inspector")
-            .default_size(268.0)
-            .size_range(240.0..=340.0)
+            .default_size(232.0)
+            .size_range(MIN_INSPECTOR_WIDTH..=maximum_width)
             .resizable(true)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::same(10)),
+                    .inner_margin(egui::Margin::same(8)),
             )
             .show(root, |ui| {
+                if self.sidebar_content_blocked("inspector") {
+                    ui.disable();
+                }
                 ui.horizontal(|ui| {
                     let icon_rect = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover()).0;
-                    icons::paint_icon(
-                        ui.painter(),
-                        icon_rect,
-                        StudioIcon::Inspector,
-                        theme::ORANGE,
-                    );
+                    icons::paint_icon(ui.painter(), icon_rect, StudioIcon::Inspector, theme::MUTED);
                     ui.label(RichText::new("INSPECTOR").strong().size(11.5));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.small_button("HIDE").clicked() {
@@ -18576,7 +18764,7 @@ impl CitrusApp {
                         }
                     });
                 });
-                ui.add_space(8.0);
+                ui.add_space(5.0);
                 egui::ScrollArea::vertical().show(ui, |ui| match self.workspace.focused {
                     StudioView::Playlist => self.clip_inspector(ui),
                     StudioView::ChannelRack => self.channel_inspector(ui),
@@ -18587,6 +18775,14 @@ impl CitrusApp {
     }
 
     fn clip_inspector(&mut self, ui: &mut egui::Ui) {
+        if self.editor_pointer_cancellation_active() || !ui.input(|input| input.focused) {
+            // Disabled egui widgets can still receive interact_pointer_pos from
+            // an already-owned press. Inspector paints before the Workspace's
+            // cancellation pass, so retire that drag before any mutable slider
+            // is built (including the first frame after a completed save).
+            ui.ctx().stop_dragging();
+            ui.disable();
+        }
         let song_length = 4096.0;
         let Some(id) = self.selected_clip else {
             empty_inspector(
@@ -18633,6 +18829,7 @@ impl CitrusApp {
         let displayed_length = self.project.clip_length_beats(&self.project.clips[index]);
         let mut pattern_length_request = None;
         let mut follow_request = None;
+        let mut envelope_pointer_started = false;
         let (
             kind,
             automation_id,
@@ -18715,22 +18912,53 @@ impl CitrusApp {
                     );
                 }
             });
-            inspector_section(ui, "CLIP ENVELOPE", |ui| {
-                property_slider(ui, "Gain", &mut clip.gain, 0.0..=1.5, "");
-                if clip.fade_in_reference.is_some() || clip.fade_out_reference.is_some() {
-                    ui.label(
-                        RichText::new("Inherited fades keep their original envelope. Controls show the visible portion; editing replaces only that side.")
-                            .size(9.0)
-                            .color(theme::MUTED),
-                    );
-                }
-                for (is_in, label) in [(true, "Fade in"), (false, "Fade out")] {
-                    let mut fraction = fade_handle_fraction(clip, is_in);
-                    if property_slider(ui, label, &mut fraction, 0.0..=1.0, "")
-                        .on_hover_text(clip_fade_tooltip(clip, is_in))
-                        .changed()
-                    {
-                        set_clip_fade(clip, is_in, fraction);
+            let playback_section = match clip.kind {
+                ClipKind::Audio => "CLIP ENVELOPE",
+                ClipKind::Pattern => "CLIP LEVEL",
+                ClipKind::Automation => "CLIP PLAYBACK",
+            };
+            inspector_section(ui, playback_section, |ui| {
+                // The common project fields are retained for compatibility, but
+                // controls must reflect the consumers in both render paths:
+                // Audio has gain/fades, Pattern has note gain, and Automation
+                // reads its source curve without either of these multipliers.
+                match clip.kind {
+                    ClipKind::Audio => {
+                        let response = property_slider(ui, "Gain", &mut clip.gain, 0.0..=1.5, "");
+                        envelope_pointer_started |= response.drag_started();
+                        if clip.fade_in_reference.is_some() || clip.fade_out_reference.is_some() {
+                            ui.label(
+                                RichText::new("Inherited fades keep their original envelope. Controls show the visible portion; editing replaces only that side.")
+                                    .size(9.0)
+                                    .color(theme::MUTED),
+                            );
+                        }
+                        for (is_in, label) in [(true, "Fade in"), (false, "Fade out")] {
+                            let mut fraction = fade_handle_fraction(clip, is_in);
+                            let response = property_slider(ui, label, &mut fraction, 0.0..=1.0, "")
+                                .on_hover_text(clip_fade_tooltip(clip, is_in));
+                            envelope_pointer_started |= response.drag_started();
+                            if response.changed() {
+                                set_clip_fade(clip, is_in, fraction);
+                            }
+                        }
+                    }
+                    ClipKind::Pattern => {
+                        let response = property_slider(ui, "Gain", &mut clip.gain, 0.0..=1.5, "")
+                            .on_hover_text("Scales this placement's notes. Plug-in instruments receive scaled MIDI velocity; their response may vary.");
+                        envelope_pointer_started |= response.drag_started();
+                        ui.label(
+                            RichText::new("For fades, automate volume or render to audio.")
+                                .size(9.0)
+                                .color(theme::MUTED),
+                        );
+                    }
+                    ClipKind::Automation => {
+                        ui.label(
+                            RichText::new("Edit the automation curve to change its values.")
+                                .size(9.0)
+                                .color(theme::MUTED),
+                        );
                     }
                 }
                 ui.toggle_value(&mut clip.muted, "MUTED");
@@ -18746,6 +18974,16 @@ impl CitrusApp {
             )
         };
 
+        if envelope_pointer_started && self.playlist_gesture_before.is_none() {
+            // Slider values can change on both press and release (including
+            // layout-dependent smart aim). Keep one pointer-owned transaction,
+            // rather than letting the timed observer split an intermediate
+            // value from a later release. The existing Playlist gesture owner
+            // suspends observation and commits on release or interruption.
+            let mut before = self.project.clone();
+            before.clips[index] = clip;
+            self.playlist_gesture_before = Some(before);
+        }
         if let Some(length) = pattern_length_request {
             self.edit_pattern_clip_length(id, length);
         }
@@ -19350,7 +19588,8 @@ impl CitrusApp {
                             );
                         egui::ComboBox::from_id_salt(("channel-mixer-destination", channel.id))
                             .selected_text(selected)
-                            .width(150.0)
+                            .width(ui.available_width().min(150.0))
+                            .truncate()
                             .show_ui(ui, |ui| {
                                 for (id, runtime_slot, name) in &mixer_destinations {
                                     ui.selectable_value(
@@ -19451,6 +19690,7 @@ impl CitrusApp {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("WET").size(8.0).color(theme::MUTED));
                         let mut wet = plugin.wet;
+                        ui.spacing_mut().slider_width = inspector_slider_rail_width(ui, &(0.0..=1.0), "", 2, "");
                         if ui
                             .add(
                                 egui::Slider::new(&mut wet, 0.0..=1.0)
@@ -19883,6 +20123,7 @@ impl CitrusApp {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("WET").size(8.0).color(theme::MUTED));
                             let mut wet = plugin.wet;
+                            ui.spacing_mut().slider_width = inspector_slider_rail_width(ui, &(0.0..=1.0), "", 2, "");
                             if ui
                                 .add(
                                     egui::Slider::new(&mut wet, 0.0..=1.0)
@@ -19985,6 +20226,7 @@ impl CitrusApp {
                                 egui::ComboBox::from_id_salt(("route-destination", route.id))
                                     .selected_text(selected_destination)
                                     .width(ui.available_width())
+                                    .truncate()
                                     .show_ui(ui, |ui| {
                                         for (id, runtime_slot, name) in &mixer_destinations {
                                             destination_changed |= ui
@@ -20001,6 +20243,7 @@ impl CitrusApp {
                                 egui::ComboBox::from_id_salt(("route-tap", route.id))
                                     .selected_text(mixer_route_tap_label(tap))
                                     .width(ui.available_width())
+                                    .truncate()
                                     .show_ui(ui, |ui| {
                                         for choice in [
                                             MixerRouteTap::PreEffects,
@@ -20017,6 +20260,7 @@ impl CitrusApp {
                                         }
                                     });
                                 let mut gain = route.gain;
+                                ui.spacing_mut().slider_width = inspector_slider_rail_width(ui, &(0.0..=4.0), "", 2, "Route gain");
                                 let gain_response = ui.add(
                                     egui::Slider::new(&mut gain, 0.0..=4.0)
                                         .text("Route gain")
@@ -20777,6 +21021,16 @@ impl CitrusApp {
     }
 
     fn register_audio_asset(&mut self, asset_id: u64, asset: wav::WavAsset) {
+        let waveform_peaks = build_waveform_peaks(&asset.samples, asset.metadata.channels, 256);
+        self.register_audio_asset_with_peaks(asset_id, asset, waveform_peaks);
+    }
+
+    fn register_audio_asset_with_peaks(
+        &mut self,
+        asset_id: u64,
+        asset: wav::WavAsset,
+        waveform_peaks: Vec<f32>,
+    ) {
         if self.retained_clip_media.contains_key(&asset_id) {
             // The incoming decoder result cannot change Project metadata or PCM.
             if let Err(error) = self.try_restore_retained_clip_asset(asset_id) {
@@ -20794,7 +21048,24 @@ impl CitrusApp {
             self.notify("Audio asset 0 is invalid and was not registered".into());
             return;
         }
-        let waveform_peaks = build_waveform_peaks(&asset.samples, asset.metadata.channels, 256);
+        if self.project.channels.iter().any(|channel| {
+            channel
+                .sampler
+                .as_ref()
+                .is_some_and(|sampler| sampler.asset_id == Some(asset_id))
+        }) && let Some(expected) = self
+            .project
+            .audio_assets
+            .iter()
+            .find(|item| item.id == asset_id)
+            && (expected.sample_rate != asset.metadata.sample_rate
+                || expected.channels != asset.metadata.channels
+                || expected.frames != asset.metadata.frames)
+        {
+            self.mark_audio_asset_failed(asset_id,
+                "Sampler source properties changed. Restore the original WAV through Project media / relink, or explicitly Load WAV in Sampler to create a new instrument source.".into());
+            return;
+        }
         let project_path = self
             .project
             .audio_assets
@@ -21313,6 +21584,7 @@ impl eframe::App for CitrusApp {
         editor_navigation::begin_frame(ui.ctx());
         piano_expression::suppress_owned_wheel_tail(ui.ctx());
         let ctx = ui.ctx().clone();
+        self.sampler_frame_start(&ctx);
         self.drive_keyboard_audition(&ctx);
         #[cfg(target_os = "windows")]
         {
@@ -21358,7 +21630,6 @@ impl eframe::App for CitrusApp {
                 self.cancel_clip_session_retirement();
             }
         }
-        let wide_layout = ui.available_width() >= 1280.0;
         self.poll_audio_device_catalog();
         self.poll_audio_stream_fault();
         self.poll_plugin_processing_health();
@@ -21440,6 +21711,11 @@ impl eframe::App for CitrusApp {
         }
         let shortcut_modal_at_frame_start = self.top_shortcut_modal();
         let shortcut_blocker_at_frame_start = self.shortcut_blocking_layer_active();
+        let transport_space = self.reserve_transport_space(
+            &ctx,
+            shortcut_modal_at_frame_start,
+            shortcut_blocker_at_frame_start,
+        );
         if self.project_lifecycle.is_modal()
             || self.recovery_available
             || self.audio_restart_state.locks_session_actions()
@@ -21454,6 +21730,7 @@ impl eframe::App for CitrusApp {
             // as well so the first modal frame cannot pass the same pointer event through.
             ui.disable();
         }
+        self.prepare_sidebar_pointer(ui);
         self.top_menu(ui);
         if self.project_lifecycle.exit_is_armed() {
             self.dispatch_armed_window_close(&ctx, close_canceled_this_frame);
@@ -21472,7 +21749,7 @@ impl eframe::App for CitrusApp {
         if self.show_browser {
             self.browser(ui);
         }
-        if self.show_inspector && wide_layout {
+        if self.show_inspector {
             self.inspector(ui);
         }
         if self.clip_operation_fence_active() {
@@ -21516,6 +21793,7 @@ impl eframe::App for CitrusApp {
             if self.piano_roll_transform.is_some() {
                 self.piano_roll_transform_dialog(&ctx);
             }
+            self.sampler_window(&ctx);
             self.note_properties_dialog(&ctx);
             self.plugin_parameter_editor_window(&ctx);
             if self.show_plugins {
@@ -21539,6 +21817,7 @@ impl eframe::App for CitrusApp {
             &ctx,
             shortcut_modal_at_frame_start,
             shortcut_blocker_at_frame_start,
+            transport_space,
         );
         self.show_toast(&ctx);
         if let Some(message) = take_audio_error_announcement(
@@ -21695,7 +21974,13 @@ fn navigation_button(
     key: &str,
     active: bool,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(78.0, 34.0), Sense::click());
+    let response = ui.add_sized(
+        Vec2::new(78.0, 32.0),
+        egui::Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+    );
+    let rect = response.rect;
     let depressed = active || response.is_pointer_button_down_on();
     let fill = if active {
         theme::WELL
@@ -21710,7 +21995,7 @@ fn navigation_button(
         depressed,
         response.has_focus(),
     ));
-    let content = rect.translate(Vec2::new(0.0, if depressed { 1.0 } else { 0.0 }));
+    let content = rect;
     if active || response.has_focus() {
         ui.painter().line_segment(
             [
@@ -21750,7 +22035,13 @@ fn navigation_button(
 }
 
 fn icon_label_button(ui: &mut egui::Ui, icon: StudioIcon, label: &str, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(87.0, 32.0), Sense::click());
+    let response = ui.add_sized(
+        Vec2::new(87.0, 30.0),
+        egui::Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+    );
+    let rect = response.rect;
     let depressed = response.is_pointer_button_down_on();
     ui.painter().add(theme::button_face(
         rect,
@@ -21764,7 +22055,7 @@ fn icon_label_button(ui: &mut egui::Ui, icon: StudioIcon, label: &str, color: Co
         depressed,
         response.has_focus(),
     ));
-    let content = rect.translate(Vec2::new(0.0, if depressed { 1.0 } else { 0.0 }));
+    let content = rect;
     icons::paint_icon(
         ui.painter(),
         Rect::from_center_size(
@@ -21867,13 +22158,7 @@ impl CitrusApp {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     if self.workspace.maximized {
-                    ui.label(
-                        RichText::new(title)
-                            .strong()
-                            .size(11.0)
-                            .color(theme::TEXT),
-                    );
-                    ui.label(RichText::new(subtitle).size(9.0).color(theme::MUTED));
+                    self.maximized_editor_title(ui, view, title, subtitle);
                     }
                     if matches!(view, StudioView::Playlist | StudioView::PianoRoll) {
                     ui.separator();
@@ -22233,7 +22518,7 @@ impl CitrusApp {
         self.workspace_header(ui, StudioView::Playlist, "PLAYLIST", &playlist_subtitle);
         self.playlist_navigation(ui);
         let available = ui.available_rect_before_wrap();
-        let track_header = 132.0;
+        let track_header = 116.0;
         let timeline_h = 26.0;
         let canvas = Rect::from_min_max(
             Pos2::new(
@@ -22365,9 +22650,9 @@ impl CitrusApp {
                 row_rect,
                 0.0,
                 if track % 2 == 0 {
-                    Color32::from_rgb(43, 52, 60)
+                    Color32::from_rgb(31, 35, 41)
                 } else {
-                    Color32::from_rgb(46, 55, 63)
+                    Color32::from_rgb(34, 38, 44)
                 },
             );
             let header_rect = Rect::from_min_size(row_rect.min, Vec2::new(track_header, row_h));
@@ -22431,11 +22716,11 @@ impl CitrusApp {
             let major = unit.rem_euclid(16) == 0;
             let medium = unit.rem_euclid(4) == 0;
             let color = if major {
-                Color32::from_rgb(29, 37, 43)
+                Color32::from_rgb(63, 70, 80)
             } else if medium {
-                Color32::from_rgb(38, 46, 53)
+                Color32::from_rgb(43, 49, 57)
             } else {
-                Color32::from_rgb(48, 57, 65)
+                Color32::from_rgb(37, 42, 49)
             };
             if !medium && beat_w < 40.0 {
                 continue;
@@ -22486,7 +22771,22 @@ impl CitrusApp {
                 ))
             })
             .collect::<HashMap<_, _>>();
-        let mut clip_consumed_click = false;
+        let automation_press_owner = if matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
+        {
+            automation_points::reserve_primary_handle(
+                ui,
+                clip_snapshot,
+                &gesture_snapshot.automation_lanes,
+                &self.playlist_selection_ids,
+                self.playlist_viewport,
+                canvas,
+                self.project_session,
+            )
+        } else {
+            None
+        };
+        let mut clip_consumed_click =
+            automation_press_owner.is_some() || self.automation_point_drag_active;
         let mut split_request: Option<(u32, f32)> = None;
         let mut delete_clip_ids: Option<HashSet<u32>> = None;
         let mut group_mute_request: Option<(HashSet<u32>, bool)> = None;
@@ -22790,38 +23090,42 @@ impl CitrusApp {
                             base,
                         );
                         if selected
-                            && self.tool_mode == ToolMode::Select
+                            && matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
                             && automation_points::valid_clip_span(clip)
                         {
                             let value_range = automation.lane.value_range();
+                            let point_position = |point: &AutomationPoint| {
+                                let timeline =
+                                    clip.start + (point.position as f32 - clip.source_offset);
+                                (timeline >= visible_start && timeline <= visible_end).then(|| {
+                                    Pos2::new(
+                                        canvas.left()
+                                            + self
+                                                .playlist_viewport
+                                                .x
+                                                .pixel_for_content(f64::from(timeline))
+                                                as f32,
+                                        curve_rect.bottom()
+                                            - value_range.normalize(point.value) as f32
+                                                * curve_rect.height(),
+                                    )
+                                })
+                            };
                             for (point_index, point) in
                                 automation.lane.points().iter().copied().enumerate()
                             {
-                                let timeline_position =
-                                    clip.start + (point.position as f32 - clip.source_offset);
-                                if timeline_position < visible_start
-                                    || timeline_position > visible_end
-                                {
+                                let Some(position) = point_position(&point) else {
                                     continue;
-                                }
-                                let normalized = value_range.normalize(point.value) as f32;
-                                let position = Pos2::new(
-                                    canvas.left()
-                                        + self
-                                            .playlist_viewport
-                                            .x
-                                            .pixel_for_content(f64::from(timeline_position))
-                                            as f32,
-                                    curve_rect.bottom() - normalized * curve_rect.height(),
-                                );
+                                };
                                 let node_rect = Rect::from_center_size(position, Vec2::splat(12.0));
                                 let node_id = id.with((
                                     "automation-point",
                                     self.project_session,
                                     point_index,
                                 ));
-                                let node_response =
-                                    ui.interact(node_rect, node_id, Sense::click_and_drag());
+                                let node_response = ui
+                                    .interact(node_rect, node_id, Sense::click_and_drag())
+                                    .on_hover_cursor(egui::CursorIcon::Grab);
                                 canvas_painter.circle_filled(position, 4.0, theme::BG);
                                 canvas_painter.circle_stroke(
                                     position,
@@ -22841,44 +23145,55 @@ impl CitrusApp {
                                 {
                                     clip_consumed_click = true;
                                 }
-                                if node_response.drag_started() {
+                                let drag_key = node_id.with("pointer-drag");
+                                let mut drag = ui.ctx().data(|data| {
+                                    data.get_temp::<(AutomationPoint, automation_points::HandlePointer)>(drag_key)
+                                }).filter(|_| self.automation_point_drag_active && ui.is_enabled() && automation_points::owns_pointer(ui.ctx(), node_id));
+                                if let Some(press) = automation_points::handle_press(
+                                    ui,
+                                    &node_response,
+                                    automation_press_owner == Some(node_id),
+                                ) {
                                     project_gesture_started = true;
                                     self.automation_point_drag_active = true;
+                                    drag =
+                                        Some((point, automation_points::HandlePointer::new(press)));
+                                }
+                                if let Some((origin, pointer)) = &mut drag {
                                     clip_consumed_click = true;
-                                    ui.ctx().data_mut(|data| {
-                                        data.insert_temp(node_id.with("origin"), point)
-                                    });
+                                    if let Some(delta) = pointer.delta(ui.ctx())
+                                        && let Some(edited) = automation_points::dragged_point(
+                                            &automation.lane,
+                                            point_index,
+                                            *origin,
+                                            delta,
+                                            beat_w,
+                                            curve_rect.height(),
+                                            clip.source_offset,
+                                            clip.start,
+                                            clip_length,
+                                            self.snap,
+                                            ui.input(|i| i.modifiers),
+                                        )
+                                    {
+                                        automation_update_request =
+                                            Some((automation.id, point_index, edited));
+                                    }
+                                    if ui.input(|input| {
+                                        input.pointer.primary_released()
+                                            || !input.pointer.primary_down()
+                                    }) {
+                                        project_gesture_stopped = true;
+                                        drag = None;
+                                    }
                                 }
-                                if node_response.dragged()
-                                    && let Some(delta) = node_response.total_drag_delta()
-                                    && let Some(origin) = ui.ctx().data(|data| {
-                                        data.get_temp::<AutomationPoint>(node_id.with("origin"))
-                                    })
-                                    && let Some(edited) = automation_points::dragged_point(
-                                        &automation.lane,
-                                        point_index,
-                                        origin,
-                                        delta,
-                                        beat_w,
-                                        curve_rect.height(),
-                                        clip.source_offset,
-                                        clip.start,
-                                        clip_length,
-                                        self.snap,
-                                        ui.input(|i| i.modifiers),
-                                    )
-                                {
-                                    automation_update_request =
-                                        Some((automation.id, point_index, edited));
-                                }
-                                if node_response.drag_stopped() {
-                                    // egui also reports drag_stopped on Escape. Preserve cancellation
-                                    // eligibility until the final transaction branch below.
-                                    project_gesture_stopped = true;
-                                    ui.ctx().data_mut(|data| {
-                                        data.remove::<AutomationPoint>(node_id.with("origin"));
-                                    });
-                                }
+                                ui.ctx().data_mut(|data| {
+                                    if let Some(drag) = drag {
+                                        data.insert_temp(drag_key, drag);
+                                    } else {
+                                        data.remove::<(AutomationPoint, automation_points::HandlePointer)>(drag_key);
+                                    }
+                                });
                                 if node_response.secondary_clicked() {
                                     let reference = automation_points::PointReference {
                                         clip_id: clip.id,
@@ -22973,6 +23288,9 @@ impl CitrusApp {
                                             ui.close();
                                         }
                                     });
+                                node_response.on_hover_text(
+                                    "Drag to edit point · Ctrl: value only · Shift: time only · Alt: bypass snap\nRight-click: value, copy/paste or delete · Drag the Clip header to move",
+                                );
                             }
                             // Register after points, but never let a handle overlap a
                             // node's hit area. A held handle retains its gesture identity.
@@ -23003,9 +23321,16 @@ impl CitrusApp {
                                 let held = ui
                                     .ctx()
                                     .data(|data| {
-                                        data.get_temp::<automation_points::TensionDrag>(drag_key)
+                                        data.get_temp::<(
+                                            automation_points::TensionDrag,
+                                            automation_points::HandlePointer,
+                                        )>(drag_key)
                                     })
-                                    .filter(|_| self.automation_point_drag_active);
+                                    .filter(|_| {
+                                        self.automation_point_drag_active
+                                            && ui.is_enabled()
+                                            && automation_points::owns_pointer(ui.ctx(), handle_id)
+                                    });
                                 let Some((source, value)) = automation_points::tension_handle(
                                     &automation.lane,
                                     point_index,
@@ -23048,8 +23373,9 @@ impl CitrusApp {
                                 if overlaps_node && held.is_none() {
                                     continue;
                                 }
-                                let handle_response =
-                                    ui.interact(hit, handle_id, Sense::click_and_drag());
+                                let handle_response = ui
+                                    .interact(hit, handle_id, Sense::click_and_drag())
+                                    .on_hover_cursor(egui::CursorIcon::ResizeVertical);
                                 let reference = automation_points::TensionReference {
                                     left: automation_points::PointReference {
                                         clip_id: clip.id,
@@ -23088,35 +23414,50 @@ impl CitrusApp {
                                     clip_consumed_click = true;
                                 }
                                 let mut drag = held;
-                                if handle_response.drag_started_by(egui::PointerButton::Primary) {
+                                if let Some(press) = automation_points::handle_press(
+                                    ui,
+                                    &handle_response,
+                                    automation_press_owner == Some(handle_id),
+                                ) {
                                     project_gesture_started = true;
                                     self.automation_point_drag_active = true;
-                                    drag = Some(automation_points::TensionDrag {
-                                        reference: reference.clone(),
-                                        last_delta_y: 0.0,
-                                    });
+                                    drag = Some((
+                                        automation_points::TensionDrag {
+                                            reference: reference.clone(),
+                                            last_delta_y: 0.0,
+                                        },
+                                        automation_points::HandlePointer::new(press),
+                                    ));
                                 }
-                                if handle_response.dragged_by(egui::PointerButton::Primary)
-                                    && let Some(state) = &mut drag
-                                    && state.reference.matches_clip(clip)
-                                    && let Some(delta) = handle_response.total_drag_delta()
-                                    && let Some((index, point)) = state.advance(
-                                        &automation.lane,
-                                        delta.y,
-                                        ui.input(|input| input.modifiers.ctrl),
-                                    )
-                                {
-                                    automation_update_request = Some((automation.id, index, point));
-                                }
-                                if handle_response.drag_stopped_by(egui::PointerButton::Primary) {
-                                    project_gesture_stopped = true;
-                                    drag = None;
+                                if let Some((state, pointer)) = &mut drag {
+                                    clip_consumed_click = true;
+                                    if state.reference.matches_clip(clip)
+                                        && let Some(delta) = pointer.delta(ui.ctx())
+                                        && let Some((index, point)) = state.advance(
+                                            &automation.lane,
+                                            delta.y,
+                                            ui.input(|input| input.modifiers.ctrl),
+                                        )
+                                    {
+                                        automation_update_request =
+                                            Some((automation.id, index, point));
+                                    }
+                                    if ui.input(|input| {
+                                        input.pointer.primary_released()
+                                            || !input.pointer.primary_down()
+                                    }) {
+                                        project_gesture_stopped = true;
+                                        drag = None;
+                                    }
                                 }
                                 ui.ctx().data_mut(|data| {
                                     if let Some(drag) = drag {
                                         data.insert_temp(drag_key, drag);
                                     } else {
-                                        data.remove::<automation_points::TensionDrag>(drag_key);
+                                        data.remove::<(
+                                            automation_points::TensionDrag,
+                                            automation_points::HandlePointer,
+                                        )>(drag_key);
                                     }
                                 });
                                 if handle_response.secondary_clicked()
@@ -23235,6 +23576,9 @@ impl CitrusApp {
                 let Some(handle_response) = handle_response else {
                     continue;
                 };
+                if automation_press_owner.is_some() || self.automation_point_drag_active {
+                    continue;
+                }
                 handle_response.context_menu(|ui| {
                     let label = match side {
                         PlaylistFadeSide::In => "Reset Fade In",
@@ -23397,7 +23741,10 @@ impl CitrusApp {
                 self.selected_clip = Some(clip.id);
                 delete_clip_ids = Some(members);
             }
-            if resize_response.clicked() {
+            if resize_response.clicked()
+                && automation_press_owner.is_none()
+                && !self.automation_point_drag_active
+            {
                 ensure_clip_group_selected(
                     clip_snapshot,
                     &mut self.playlist_selection_ids,
@@ -23432,6 +23779,7 @@ impl CitrusApp {
                     .data_mut(|data| data.insert_temp(move_key, origins));
             }
             if matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
+                && !self.automation_point_drag_active
                 && response.dragged()
                 && let Some(origins) = ui.ctx().data(|data| data.get_temp::<Vec<Clip>>(move_key))
                 && let Some(anchor) = origins.iter().find(|origin| origin.id == clip.id)
@@ -23461,6 +23809,8 @@ impl CitrusApp {
                 group_slip_request = Some((origins, drag_delta.x / beat_w));
             }
             if response.drag_stopped()
+                && automation_press_owner.is_none()
+                && !self.automation_point_drag_active
                 && matches!(
                     self.tool_mode,
                     ToolMode::Select | ToolMode::Draw | ToolMode::Slip
@@ -23470,6 +23820,7 @@ impl CitrusApp {
             }
             let resize_key = id.with("resize-origin");
             if resize_response.drag_started()
+                && !self.automation_point_drag_active
                 && matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
             {
                 project_gesture_started = true;
@@ -23489,6 +23840,7 @@ impl CitrusApp {
                     .data_mut(|data| data.insert_temp(resize_key, origins));
             }
             if matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
+                && !self.automation_point_drag_active
                 && resize_response.dragged()
                 && let Some(origins) = ui.ctx().data(|data| data.get_temp::<Vec<Clip>>(resize_key))
                 && let Some(anchor) = origins.iter().find(|origin| origin.id == clip.id)
@@ -23510,6 +23862,8 @@ impl CitrusApp {
                 }
             }
             if resize_response.drag_stopped()
+                && automation_press_owner.is_none()
+                && !self.automation_point_drag_active
                 && matches!(self.tool_mode, ToolMode::Select | ToolMode::Draw)
             {
                 project_gesture_stopped = true;
@@ -23664,22 +24018,7 @@ impl CitrusApp {
             }
         }
         if let Some(clip_ids) = delete_clip_ids {
-            self.project
-                .clips
-                .retain(|clip| !clip_ids.contains(&clip.id));
-            self.project
-                .audio_clip_mixer_destinations
-                .retain(|destination| !clip_ids.contains(&destination.clip_id));
-            let used_automation_ids = self
-                .project
-                .clips
-                .iter()
-                .filter_map(|clip| clip.automation_id)
-                .collect::<HashSet<_>>();
-            self.project
-                .automation_lanes
-                .retain(|automation| used_automation_ids.contains(&automation.id));
-            normalize_playlist_clip_groups(&mut self.project.clips);
+            self.project.delete_playlist_clips(&clip_ids);
             self.playlist_selection_ids
                 .retain(|clip_id| !clip_ids.contains(clip_id));
             self.selected_clip = self.playlist_selection_ids.iter().copied().min();
@@ -24009,11 +24348,29 @@ impl CitrusApp {
             self.project.active_pattern().length_steps
         );
         self.workspace_header(ui, StudioView::ChannelRack, "CHANNEL RACK", &pattern_label);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button("Sampler…")
+                .on_hover_text("Edit a WAV instrument for the selected Channel")
+                .clicked()
+                && let Some(channel) = self.project.channels.get(self.selected_channel)
+            {
+                self.open_sampler(channel.id);
+            }
+            if ui
+                .button("+ Sampler channel")
+                .on_hover_text("Create an empty native Channel and load a WAV")
+                .clicked()
+            {
+                self.new_sampler_channel();
+            }
+        });
         let active_step = self.rack_editor_playing_step();
         let mut audition = Vec::new();
         let mut automation_request = None;
         let mut channel_selection_changed = false;
         let mut open_piano_channel = None;
+        let mut open_sampler_channel = None;
         let notes = [36_u8, 39, 54, 43, 64];
         let mixer_track_ids_by_runtime_slot = (0..crate::mixer_graph::MIXER_GRAPH_MAX_NODES)
             .map(|runtime_slot| self.project.mixer_track_id_at_runtime_slot(runtime_slot))
@@ -24066,6 +24423,10 @@ impl CitrusApp {
                                     )
                                     .on_hover_text(&channel.name);
                                 channel_button.context_menu(|ui| {
+                                    if ui.studio_button("Sampler…").clicked() {
+                                        open_sampler_channel = Some(channel.id);
+                                        ui.close();
+                                    }
                                     if ui.studio_button("Piano roll").clicked() {
                                         open_piano_channel = Some(channel_index);
                                         ui.close();
@@ -24077,8 +24438,11 @@ impl CitrusApp {
                                     self.selected_channel = channel_index;
                                     audition.push((
                                         channel.id,
-                                        notes.get(channel_index).copied().unwrap_or(60),
-                                        channel.volume,
+                                        sampler_ui::step_note(
+                                            channel,
+                                            notes.get(channel_index).copied().unwrap_or(60),
+                                        ),
+                                        sampler_ui::note_velocity(channel, 1.0, channel.volume),
                                         channel.mixer_track,
                                     ));
                                 }
@@ -24245,8 +24609,15 @@ impl CitrusApp {
                                         if !on {
                                             audition.push((
                                                 channel.id,
-                                                notes.get(channel_index).copied().unwrap_or(60),
-                                                channel.volume,
+                                                sampler_ui::step_note(
+                                                    channel,
+                                                    notes.get(channel_index).copied().unwrap_or(60),
+                                                ),
+                                                sampler_ui::note_velocity(
+                                                    channel,
+                                                    1.0,
+                                                    channel.volume,
+                                                ),
                                                 channel.mixer_track,
                                             ));
                                         }
@@ -24266,6 +24637,9 @@ impl CitrusApp {
                     ui.add(egui::Slider::new(&mut self.project.swing, 0.0..=1.0).show_value(false));
                 });
             });
+        if let Some(channel) = open_sampler_channel {
+            self.open_sampler(channel);
+        }
         if let Some(index) = open_piano_channel {
             self.selected_channel = index;
             channel_selection_changed = true;
@@ -24448,7 +24822,6 @@ impl CitrusApp {
             .collect::<Vec<_>>();
         self.piano_roll_state
             .retain_existing(&self.project.active_pattern().notes);
-        let piano_content_end = piano_pattern_content_end(self.project.active_pattern());
         let channel_name = self
             .project
             .channels
@@ -24551,8 +24924,7 @@ impl CitrusApp {
                 }),
             );
             ui.separator();
-            ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES")
-                .on_hover_text("Show notes from other Channels — Alt+V");
+            self.piano_ghost_controls(ui);
             ui.separator();
             ui.menu_button("NOTE EDIT v", |ui| {
                 ui.set_width(440.0);
@@ -24577,10 +24949,11 @@ impl CitrusApp {
             }
             let range = self.piano_roll_state.repeat_range.map_or_else(|| "Range none".to_owned(), |r| format!("Range {:.2}–{:.2}", r.start,r.end));
             let paste = self.piano_paste_anchor().map_or_else(|_| "Paste invalid".to_owned(),|beat|format!("Paste {beat:.2}"));
-            ui.allocate_ui_with_layout(Vec2::new(if compact_piano { 136.0 } else { 222.0 }, 18.0), Layout::left_to_right(Align::Center), |ui| {
-                ui.set_min_width(if compact_piano { 136.0 } else { 222.0 });
-                ui.label(RichText::new(if compact_piano { range } else { format!("{range} · {paste}") }).size(9.0).color(theme::ORANGE))
-                .on_hover_text("Edit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
+            let range_tooltip = format!("{range} · {paste}\nEdit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
+            ui.allocate_ui_with_layout(Vec2::new(136.0, 18.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.set_min_width(136.0);
+                ui.add(egui::Label::new(RichText::new(if compact_piano { range } else { format!("{range} · {paste}") }).size(9.0).color(theme::ORANGE)).truncate())
+                .on_hover_text(range_tooltip);
             });
         });
         if target_channel_changed {
@@ -24611,10 +24984,11 @@ impl CitrusApp {
             .get(self.selected_channel)
             .map(|channel| (channel.id, channel.mixer_track));
         let piano_snap = self.piano_roll_state.local_snap;
+        let piano_content_end = self.piano_ghost_content_end();
         let available = ui.available_rect_before_wrap();
-        let keyboard_w = 72.0;
-        let velocity_h = 75.0;
-        let timeline_h = 27.0;
+        let keyboard_w = 60.0;
+        let velocity_h = 64.0;
+        let timeline_h = 24.0;
         let grid = Rect::from_min_max(
             Pos2::new(available.left() + keyboard_w, available.top() + timeline_h),
             Pos2::new(available.right(), available.bottom() - velocity_h),
@@ -24622,6 +24996,12 @@ impl CitrusApp {
         let velocity_rect = Rect::from_min_max(
             Pos2::new(grid.left(), grid.bottom()),
             available.right_bottom(),
+        );
+        // Expose the actual painted lane geometry, independently of its note handles.
+        let _ = ui.interact(
+            velocity_rect,
+            Id::new("piano-velocity-lane"),
+            Sense::hover(),
         );
         let _ = self
             .piano_viewport
@@ -24687,22 +25067,22 @@ impl CitrusApp {
             let scale_root = note.rem_euclid(12) == usize::from(self.piano_roll_state.scale_root);
             let row_color = if self.piano_roll_state.scale_highlighting {
                 if scale_root {
-                    Color32::from_rgb(48, 39, 27)
+                    Color32::from_rgb(44, 40, 34)
                 } else if in_scale {
                     if black {
-                        Color32::from_rgb(21, 25, 26)
+                        Color32::from_rgb(27, 31, 36)
                     } else {
-                        Color32::from_rgb(31, 36, 37)
+                        Color32::from_rgb(34, 39, 45)
                     }
                 } else if black {
-                    Color32::from_rgb(13, 16, 18)
+                    Color32::from_rgb(23, 27, 32)
                 } else {
-                    Color32::from_rgb(19, 22, 24)
+                    Color32::from_rgb(29, 33, 39)
                 }
             } else if black {
-                Color32::from_rgb(18, 21, 23)
+                Color32::from_rgb(25, 29, 34)
             } else {
-                Color32::from_rgb(27, 31, 33)
+                Color32::from_rgb(33, 38, 44)
             };
             let row_rect = Rect::from_min_size(
                 Pos2::new(available.left(), y),
@@ -24756,13 +25136,13 @@ impl CitrusApp {
                 Stroke::new(
                     if line.bar { 1.1 } else { 0.6 },
                     if line.bar {
-                        Color32::from_rgb(80, 85, 86)
+                        Color32::from_rgb(68, 77, 88)
                     } else if !line.snap_target {
                         theme::GRID.gamma_multiply(0.45)
                     } else if line.beat_line {
                         theme::GRID
                     } else {
-                        Color32::from_rgb(37, 41, 43)
+                        Color32::from_rgb(39, 45, 52)
                     },
                 ),
             );
@@ -24908,6 +25288,11 @@ impl CitrusApp {
                 );
             }
         }
+        self.paint_piano_ghosts(
+            &note_grid_painter,
+            grid,
+            selected_channel_route.map(|(channel_id, _)| channel_id),
+        );
         let notes = &mut self.project.patterns[pattern_index].notes;
         for (index, note) in notes.iter_mut().enumerate() {
             if note.note > 127
@@ -24924,7 +25309,8 @@ impl CitrusApp {
                 .and_then(|channel_id| channel_choices.iter().find(|(id, ..)| *id == channel_id));
             let editable =
                 note.channel_id == selected_channel_route.map(|(channel_id, _)| channel_id);
-            if !editable && !self.piano_roll_state.ghosts_visible {
+            // Ghosts have already been painted in a non-interactive background pass.
+            if !editable {
                 continue;
             }
             let note_color = note_route
@@ -24938,20 +25324,6 @@ impl CitrusApp {
             let (_, rect, body_rect, resize_rect) =
                 piano_mouse::note_rects(grid, self.piano_viewport, note);
             let id = Id::new(("piano-note", note.id));
-            if !editable {
-                note_grid_painter.rect_filled(
-                    rect,
-                    1.0,
-                    theme::SETTINGS_MUTED.gamma_multiply(0.11),
-                );
-                note_grid_painter.rect_stroke(
-                    rect,
-                    1.0,
-                    Stroke::new(1.0, theme::SETTINGS_MUTED.gamma_multiply(0.28)),
-                    StrokeKind::Inside,
-                );
-                continue;
-            }
             let resize_tool = matches!(
                 self.piano_roll_state.tool,
                 PianoRollTool::Draw
@@ -24981,7 +25353,7 @@ impl CitrusApp {
                 } else if selected {
                     0.95
                 } else {
-                    0.67
+                    0.82
                 }),
             );
             note_grid_painter.rect_stroke(
@@ -28916,58 +29288,97 @@ fn library_row(ui: &mut egui::Ui, name: &str, tag: &str, color: Color32) -> Resp
 }
 
 fn inspector_identity(ui: &mut egui::Ui, name: &str, kind: &str, color: Color32) {
-    egui::Frame::NONE
-        .fill(theme::BG)
-        .stroke(Stroke::new(1.0, theme::GRID))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::same(10))
+    let response = egui::Frame::NONE
+        .fill(theme::WELL)
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(9, 7))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let (bar, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-            ui.painter().rect_filled(bar, 2.0, color);
-            ui.add_space(4.0);
-            ui.label(RichText::new(name).strong().size(15.0));
-            ui.label(RichText::new(kind).monospace().size(8.0).color(color));
+            ui.label(RichText::new(name).strong().size(14.0));
+            ui.label(RichText::new(kind).size(9.0).color(theme::MUTED));
         });
-    ui.add_space(8.0);
+    ui.painter().line_segment(
+        [
+            response.response.rect.left_top() + Vec2::new(1.0, 5.0),
+            response.response.rect.left_bottom() + Vec2::new(1.0, -5.0),
+        ],
+        Stroke::new(2.0, color),
+    );
+    ui.add_space(5.0);
 }
 
 fn empty_inspector(ui: &mut egui::Ui, title: &str, body: &str) {
-    ui.add_space(24.0);
-    ui.vertical_centered(|ui| {
-        ui.label(RichText::new(title).size(14.0).color(theme::MUTED));
-        ui.add_space(4.0);
-        ui.label(RichText::new(body).size(9.5).color(theme::MUTED));
-    });
+    ui.add_space(16.0);
+    ui.label(RichText::new(title).size(12.5).color(theme::TEXT));
+    ui.label(RichText::new(body).size(10.0).color(theme::MUTED));
 }
 
 fn inspector_section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-    ui.label(RichText::new(title).strong().size(8.0).color(theme::MUTED));
+    ui.label(RichText::new(title).strong().size(9.0).color(theme::MUTED));
     egui::Frame::NONE
-        .fill(theme::PANEL_ALT)
-        .stroke(Stroke::new(1.0, theme::GRID))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::same(9))
+        .inner_margin(egui::Margin::symmetric(2, 4))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add_contents(ui);
         });
-    ui.add_space(9.0);
+    ui.add_space(3.0);
+    ui.separator();
+    ui.add_space(3.0);
 }
 
 fn property_line(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(9.0).color(theme::MUTED));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(value)
-                    .monospace()
-                    .size(8.5)
-                    .color(theme::TEXT),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(value)
+                        .monospace()
+                        .size(8.5)
+                        .color(theme::TEXT),
+                )
+                .wrap(),
             );
         });
     });
+}
+
+/// Rail space excludes the native numeric readout and any trailing slider label.
+/// Compute it at the actual row, after its parent margins and leading labels.
+fn inspector_slider_rail_width(
+    ui: &egui::Ui,
+    range: &std::ops::RangeInclusive<f32>,
+    suffix: &str,
+    decimals: usize,
+    trailing_label: &str,
+) -> f32 {
+    let number_font = ui.style().drag_value_text_style.resolve(ui.style());
+    let label_font = egui::TextStyle::Body.resolve(ui.style());
+    let (readout_width, label_width) = ui.fonts_mut(|fonts| {
+        let number_width = [*range.start(), *range.end()]
+            .into_iter()
+            .map(|endpoint| {
+                fonts
+                    .layout_no_wrap(
+                        format!("{endpoint:.decimals$}{suffix}"),
+                        number_font.clone(),
+                        theme::TEXT,
+                    )
+                    .size()
+                    .x
+            })
+            .fold(0.0_f32, f32::max);
+        let label_width = fonts
+            .layout_no_wrap(trailing_label.to_owned(), label_font, theme::TEXT)
+            .size()
+            .x;
+        (number_width, label_width)
+    });
+    let readout_width =
+        (readout_width + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x);
+    let gaps = if trailing_label.is_empty() { 1.0 } else { 2.0 };
+    (ui.available_width() - readout_width - label_width - gaps * ui.spacing().item_spacing.x - 1.0)
+        .max(24.0)
 }
 
 fn property_slider(
@@ -28982,6 +29393,12 @@ fn property_slider(
             [62.0, 22.0],
             egui::Label::new(RichText::new(label).size(9.0).color(theme::MUTED)),
         );
+        // Budget within this actual row, after section/scroll margins and its
+        // label. The Slider's rail width excludes its native numeric DragValue;
+        // deriving it from the outer panel made narrow inspectors grow each pass.
+        // Preserve native adaptive precision, including its extra Shift-drag
+        // digit: bounded Inspector ranges/widths can display up to six decimals.
+        ui.spacing_mut().slider_width = inspector_slider_rail_width(ui, &range, suffix, 6, "");
         ui.add(
             egui::Slider::new(value, range)
                 .show_value(true)
@@ -30567,6 +30984,13 @@ fn validate_plugin_load(
 ) -> Result<(), String> {
     if !plugin_target_is_valid(project, target) {
         return Err("the target plug-in destination is out of range".into());
+    }
+    if let PluginPickerTarget::ChannelDevice { channel } = target
+        && project.channels[channel].sampler.is_some()
+    {
+        return Err(
+            "Choose Use native synth in the Sampler editor to unload it before assigning a VST instrument".into(),
+        );
     }
     if descriptor.path.to_string_lossy().trim().is_empty() {
         return Err("the indexed plug-in has no file path".into());

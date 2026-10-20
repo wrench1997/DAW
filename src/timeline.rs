@@ -426,6 +426,7 @@ pub struct AutomationBaseValue {
 /// the consumer combines this state with automation at render time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChannelBaseDescriptor {
+    pub sampler: Option<crate::sampler::SamplerConfig>,
     pub channel_id: u32,
     pub volume: f32,
     pub pan: f32,
@@ -587,6 +588,7 @@ pub struct ChasedAutomationLayer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChasedNote {
+    pub elapsed_frames: u64,
     pub note_id: u64,
     pub channel_id: u32,
     pub note: u8,
@@ -687,7 +689,12 @@ impl CompiledTimeline {
         &self.driven_automation_targets
     }
 
-    #[must_use]
+    pub fn sampler_asset_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.channel_bases
+            .iter()
+            .filter_map(|base| base.sampler.and_then(|config| config.asset_id))
+    }
+
     pub fn channel_bases(&self) -> &[ChannelBaseDescriptor] {
         &self.channel_bases
     }
@@ -766,6 +773,7 @@ impl CompiledTimeline {
                     notes.insert(
                         note_id,
                         ChasedNote {
+                            elapsed_frames: frame.saturating_sub(event.frame),
                             note_id,
                             channel_id,
                             note,
@@ -1409,6 +1417,12 @@ impl<'a> Compiler<'a> {
                 .find(|mapping| mapping.channel_id == channel.id)
                 .map_or_else(
                     || {
+                        if let Some(config) = channel
+                            .sampler
+                            .filter(|_| channel.instrument_plugin_instance_id.is_none())
+                        {
+                            return config.root_note;
+                        }
                         LEGACY_STEP_NOTES
                             .get(index)
                             .copied()
@@ -1796,6 +1810,9 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             self.channel_bases.push(ChannelBaseDescriptor {
+                sampler: channel
+                    .sampler
+                    .filter(|_| channel.instrument_plugin_instance_id.is_none()),
                 channel_id: state.id,
                 volume: channel.volume,
                 pan: finite_or(channel.pan, 0.0).clamp(-1.0, 1.0),
@@ -3249,6 +3266,7 @@ mod tests {
             solo,
             mixer_track: crate::model::mixer_track_id_for_runtime_slot(mixer_track.min(31) as u8),
             instrument_plugin_instance_id: None,
+            sampler: None,
             steps: [false; 16],
         }
     }

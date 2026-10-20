@@ -188,7 +188,7 @@ fn held_keyboard_focus_loss_or_hidden_editor_cancels_without_automatic_resume() 
             // The key is already physically down. A second Press event at the
             // toolbar is not a real click; release it before clicking Hide.
             pointer(&mut fixture, point, Some(false));
-            fixture.ui.click("Hide editor");
+            fixture.ui.workspace_action("Hide editor");
             assert!(
                 !fixture.ui.app.workspace.windows[workspace::index(StudioView::PianoRoll)].visible
             );

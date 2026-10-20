@@ -2315,3 +2315,63 @@ this checkpoint. The prior 1,730 Rust and 253 zero-skip Python integration passe
 remain attributed to `185bf2a` using the original `a9700799`/build031 executable.
 The separately qualified genuine007 Linux Surge workflow is unchanged; this
 correction does not claim Windows selected-clip plugin runtime support.
+
+
+## 2026-10-17 14:25 UTC — Act on strict workflow failures and redesign request
+
+- User requested code changes until acceptance succeeds and a substantial visual improvement.
+- Frozen baseline aff57b2 was confirmed as the remote development head through the GitHub branches API at 14:26 UTC; its historical quality39033633585/preview39033633575 both passed first attempt.
+- Independent no-default strict acceptance at that baseline ran 87 unique tests: 85 passed, two newly discovered product failures. Pattern deletion erased unrelated unplaced global automation; editable Pattern fade produced no PCM change. Both were repeated as failing assertions in a new test process. Existing 82 selected tests passed, not a whole-repository claim.
+- Fix and visual work is now in isolated worktrees; shared integration, screenshots and final gates are pending. No production success or professional FL parity is claimed yet. Original failure evidence remains preserved.
+
+## 2026-10-17 15:34 UTC — Integrated repair regression checkpoint
+
+- Preserved original deletion failure body now passes; 44 focused creation/deletion/Inspector/keyboard/visual cases passed with real App inputs and WGPU capture.
+- First complete internal-engine run found seven failures (2039 passed, one ignored). Repaired real narrow Inspector width expansion and updated obsolete geometry/menu/feedback fixtures with live-control bounds. All seven repeated successfully.
+- Complete frozen-source repetition: 2046 passed, zero failed, one existing opt-in ignored. Python: 368 run, nine existing optional/platform skips, no failures. Both strict Clippy configurations and all-feature binaries built successfully.
+- Fine-decimal/Shift layout qualification and final all-feature/Windows exact-commit gates are still pending. No Pattern envelope DSP, real-device/third-party plugin or FL parity acceptance is claimed. See `docs/qa/20261017-strict-repair-integration.md` for retained failures and boundaries.
+
+## 2026-10-17 16:02 UTC — Final cloud-local source acceptance
+
+- Final all-feature/all-target: 2719 passed, zero failed, nine opt-in ignored across 2728 discovered cases in five executables.
+- Final no-default App: 2047 passed, zero failed, one opt-in ignored across 2048 discovered cases. Feature-configuration counts overlap, not additive unique coverage.
+- Both strict Clippy configurations, formatting, App/helper build and Python discovery (359 pass/nine existing skips) passed.
+- Source-only package includes final logs and genuine rendered images. GitHub push remains blocked pending the requested fresh authorization; Windows exact-commit checks have not run. No main merge or installer publication.
+
+## 2026-10-17 17:26 UTC — Direct native desktop usability follow-up
+
+- Actual cloud desktop mouse/keyboard operation found new gaps beyond the prior green suites: narrow Inspector access, indirect editor maximization, hidden Select-only automation editing, coalesced automation input loss and sidebar-origin input leaking into music edits.
+- The real native window required a QA-only Mesa non-SHM presentation fallback; no application rendering/model code or system access controls were changed for that compatibility setup. No physical audio hardware is present.
+- Native recheck confirms Inspector opens at 1180 px and title double-click/Restore work. A further sidebar drag still inserted a note; Undo restored it and the failure is being repaired rather than declared accepted. Automation's new18 and related 147 tests pass; final native/aggregate checks remain pending.
+- Native Save chooser is unqualified in this image because both portal/Zenity backends are absent. Recovery data and live instances were preserved. This does not establish a Windows Save failure.
+
+## 2026-10-17 17:41 UTC — Native failed-action replay passed
+
+Final integrated 0f2d928 was rebuilt and launched separately. Actual narrow Inspector toggling, repeated fast divider grow/shrink across a floating Piano, direct title maximization and Draw automation fast dragging now pass. The native menu confirms 1.0→0.1; single Undo/Redo restores both states. Original live instances/recovery data were preserved. Complete aggregate gates remain running; physical audio, file chooser, external plugin and Windows acceptance are not inferred from these native mouse/keyboard results.
+
+## 2026-10-17 18:04 UTC — Native interaction repair final gates
+
+- Replayed real cloud desktop failures on source0f2d928: narrow Inspector, sidebar drag into floating Piano, direct maximize, Draw automation fast drag and Undo/Redo passed. Recovery payload comparison preserves all notes and clips.
+- Final all-feature/all-target:2770 passed/0 failed/9 existing ignores; no-default App:2098 passed/0 failed/1 existing ignore. Feature-disabled protocol targets list zero tests. Counts overlap across configurations.
+- Both strict Clippy profiles, formatting and Python359 passed/9 existing skips. Full native evidence and qualified runtime limitations recorded in docs/qa/20261017-native-desktop-usability.md.
+- Source/evidence packaging includes checked before/after recovery data. Picker dependencies remain absent; no new packages/services installed. Physical audio/commercial plugins/new Windows acceptance remain unverified. No remote push retried.
+
+## 2026-10-18 05:18 UTC — Ghost and sampler real workflow, integration still open
+
+- Restored verified Library archive into independent cloud snapshot; untouched shared dirty checkout. Official local toolchain and file picker restored.
+- Integrated reference ghosts and native-rate sampler DSP, editor and WAV export. Actual native authored three notes, edited Loop/ADSR, verified one-step Undo/Redo, saved v15 and exported48kHz/24bit PCM with matching pitches.
+- Cold reopen preserved score/settings but exposed offline blank waveform. Added background view-only preview cache; native rerun pending.
+- Full all-feature suite is running on751dd2; one existing compact toolbar test has failed and is being repaired without loosening geometry.
+- Added review requirement for persisted empty sampler silence instead of accidentally switching to oscillator; implementation ongoing. No push, no new Windows/device claim.
+
+## 2026-10-18 05:40 UTC — Final native replay on0d4d6f8
+
+- Actual cold reopen now restores waveform without an audio engine; view-only preview plus Save leaves Project bytes unchanged.
+- Final compact ghosts pass native source selection/hide/show/read-only behavior. Empty sampler is persisted as null asset and survives cancelled loading.
+- Real File-menu WAV export with the empty channel remains byte-identical to earlier measured three-note PCM. All native App states retained/minimized.
+- Final all-feature and no-default aggregate runs use immutable binaries and separate temporary roots. Counts pending; no new source edits while they run.
+
+## 2026-10-18 05:45 UTC — Final independent gates completed
+
+- 冻结应用源码0d4d6f8最终全特性/all-target 2836通过、0失败、9既有可选忽略（2845唯一用例）；no-default App2164通过、0失败、1既有忽略（2165唯一用例），三个feature禁用协议目标0测试。两个配置重叠，不相加。双配置严格Clippy、fmt、App/helper构建通过；Python359通过/9既有跳过。真实云端native加载、参数编辑、Undo/Redo、保存/冷重开波形、Ghost只读与稳定布局、空Sampler持久化及WAV导出均有证据。
+- Added guides to package source allowlist, retained actual failures separately, and prepared source/bundle/patch plus native evidence and a portable generated test Project. No remote push or new hardware/Windows claim.

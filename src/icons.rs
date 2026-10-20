@@ -1,10 +1,9 @@
-use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{Color32, Pos2, Rect, Response, Stroke, StrokeKind, Ui, Vec2};
 
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StudioIcon {
-    Menu,
     Undo,
     Redo,
     Folder,
@@ -33,70 +32,78 @@ pub enum StudioIcon {
     Browser,
     Inspector,
     Settings,
-    More,
 }
 
 pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    let depressed = active || response.is_pointer_button_down_on();
+    // Native Button supplies keyboard/accessibility semantics; custom paint remains flat.
+    let response = ui.add_sized(
+        Vec2::splat(size),
+        egui::Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+    );
+    let rect = response.rect;
+    let depressed = response.is_pointer_button_down_on();
     let fill = if active {
         theme::ORANGE_DIM
+    } else if depressed {
+        theme::WELL
     } else if response.hovered() {
-        theme::HIGHLIGHT
+        theme::RAISED
     } else {
-        theme::PANEL_ALT
+        Color32::TRANSPARENT
     };
     ui.painter().add(theme::button_face(
         rect,
-        if depressed { theme::WELL } else { fill },
+        fill,
         depressed,
         response.has_focus(),
     ));
-    if active || response.has_focus() {
-        ui.painter().line_segment(
-            [
-                rect.left_bottom() + Vec2::new(4.0, -1.0),
-                rect.right_bottom() + Vec2::new(-4.0, -1.0),
-            ],
-            Stroke::new(2.0, theme::ORANGE),
-        );
-    }
     paint_icon(
         ui.painter(),
-        rect.shrink(size * 0.24)
-            .translate(Vec2::new(0.0, if depressed { 1.0 } else { 0.0 })),
+        rect.shrink(size * 0.24),
         icon,
-        if active { theme::ORANGE } else { theme::TEXT },
+        if active { theme::ORANGE } else { theme::MUTED },
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            active,
+            format!("{icon:?}"),
+        )
+    });
     response
 }
 
 pub fn transport_button(ui: &mut Ui, icon: StudioIcon, active: bool, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-    let depressed = active || response.is_pointer_button_down_on();
+    let response = ui.add_sized(
+        Vec2::splat(34.0),
+        egui::Button::new("")
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::NONE),
+    );
+    let rect = response.rect;
     let fill = if active {
-        theme::ORANGE_DIM
+        theme::mix(theme::PANEL, color, 0.22)
+    } else if response.is_pointer_button_down_on() {
+        theme::WELL
     } else if response.hovered() {
         theme::HIGHLIGHT
     } else {
         theme::RAISED
     };
-    let center = rect.center() + Vec2::new(0.0, if depressed { 1.0 } else { 0.0 });
     ui.painter()
-        .circle_filled(rect.center() + Vec2::new(0.0, 2.0), 17.0, theme::WELL);
-    ui.painter()
-        .circle_filled(center, 16.0, if depressed { theme::WELL } else { fill });
-    ui.painter().circle_stroke(
-        center,
-        16.0,
-        Stroke::new(1.0, if active { color } else { theme::HIGHLIGHT }),
-    );
-    paint_icon(
-        ui.painter(),
-        rect.shrink(11.0).translate(center - rect.center()),
-        icon,
-        color,
-    );
+        .add(theme::button_face(rect, fill, active, response.has_focus()));
+    paint_icon(ui.painter(), rect.shrink(10.0), icon, color);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            active,
+            format!("{icon:?}"),
+        )
+    });
     response
 }
 
@@ -107,14 +114,6 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: StudioIcon, color: 
     let s = Stroke::new((w / 9.0).clamp(1.25, 1.8), color);
     let line = |a: Pos2, b: Pos2| painter.line_segment([a, b], s);
     match icon {
-        StudioIcon::Menu => {
-            for dy in [-h * 0.32, 0.0, h * 0.32] {
-                line(
-                    Pos2::new(rect.left(), c.y + dy),
-                    Pos2::new(rect.right(), c.y + dy),
-                );
-            }
-        }
         StudioIcon::Undo | StudioIcon::Redo => {
             let flip = if icon == StudioIcon::Undo { -1.0 } else { 1.0 };
             let points = (0..=12)
@@ -501,10 +500,46 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: StudioIcon, color: 
                 line(p1, p2);
             }
         }
-        StudioIcon::More => {
-            for dx in [-w * 0.32, 0.0, w * 0.32] {
-                painter.circle_filled(Pos2::new(c.x + dx, c.y), w * 0.08, color);
-            }
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_icon_button_keeps_native_keyboard_activation_and_fixed_hit_bounds() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut first = Rect::NOTHING;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let response = icon_button(ui, StudioIcon::Pencil, false, 28.0);
+            first = response.rect;
+            response.request_focus();
+        });
+        let mut clicked = false;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                let response = icon_button(ui, StudioIcon::Pencil, false, 28.0);
+                clicked = response.clicked();
+                assert!(response.has_focus());
+                assert_eq!(response.rect, first);
+            },
+        );
+        assert!(
+            clicked,
+            "native Enter must activate the custom-painted tool"
+        );
+        assert!(first.width() >= 28.0 && first.height() >= 28.0);
     }
 }

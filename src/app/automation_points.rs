@@ -1,6 +1,291 @@
 //! Playlist-only automation gestures. No persisted format or evaluation changes.
 use super::*;
 
+/// The pointer origin survives a release in the same frame as its last motion.
+/// Native egui drag responses omit that final motion and whole down/move/up batches.
+#[derive(Clone, Debug)]
+pub(super) struct HandlePointer {
+    origin: Pos2,
+    moved: bool,
+}
+
+impl HandlePointer {
+    pub fn new(origin: Pos2) -> Self {
+        Self {
+            origin,
+            moved: false,
+        }
+    }
+
+    pub fn delta(&mut self, ctx: &egui::Context) -> Option<Vec2> {
+        let position = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+                .or_else(|| input.pointer.interact_pos())
+        })?;
+        let delta = position - self.origin;
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            return None;
+        }
+        self.moved |= delta != Vec2::ZERO;
+        self.moved.then_some(delta)
+    }
+}
+
+/// Keep one ordered press/release pair. A mixed release→press or multiple-click
+/// frame cannot borrow another gesture's endpoint and synthesize a curve edit.
+fn primary_press(ctx: &egui::Context) -> Option<Pos2> {
+    ctx.input(|input| {
+        let mut press = None;
+        let mut released = false;
+        for event in &input.events {
+            if let egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                ..
+            } = event
+            {
+                if *pressed {
+                    if press.is_some() || released || !pos.x.is_finite() || !pos.y.is_finite() {
+                        return None;
+                    }
+                    press = Some(*pos);
+                } else {
+                    if press.is_none() || released {
+                        return None;
+                    }
+                    released = true;
+                }
+            }
+        }
+        press
+    })
+}
+
+/// Capture a handle using the raw primary-press position. A resolved owner is
+/// authoritative even when egui's final-position hit test names another widget.
+pub(super) fn handle_press(ui: &egui::Ui, response: &Response, owns_press: bool) -> Option<Pos2> {
+    if !ui.is_enabled() || ui.is_sizing_pass() || !response.enabled() {
+        return None;
+    }
+    let position = primary_press(ui.ctx())?;
+    if !response.interact_rect.contains(position)
+        || ui.ctx().layer_id_at(position) != Some(response.layer_id)
+        || !owns_press
+    {
+        return None;
+    }
+    // A discarded layout pass reuses input events. Never apply one press twice.
+    let key = response.id.with("automation-press-frame");
+    let frame = ui.ctx().cumulative_frame_nr();
+    ui.ctx().data_mut(|data| {
+        if data.get_temp::<u64>(key) == Some(frame) {
+            None
+        } else {
+            data.insert_temp(key, frame);
+            data.insert_temp(Id::new("automation-pointer-owner"), response.id);
+            Some(position)
+        }
+    })
+}
+
+pub(super) fn owns_pointer(ctx: &egui::Context, id: Id) -> bool {
+    ctx.data(|data| data.get_temp::<Id>(Id::new("automation-pointer-owner"))) == Some(id)
+}
+
+/// Resolve the frontmost Clip at the primary press, including press+move input
+/// whose release arrives later. Within it, reverse registration order and node
+/// priority over nonoverlapping tension handles preserve ordinary hit ownership.
+pub(super) fn batched_clip_press(
+    ui: &egui::Ui,
+    clip: &Clip,
+    clips: &[Clip],
+    viewport: Viewport2D,
+    canvas: Rect,
+) -> Option<Pos2> {
+    if !ui.is_enabled() || ui.is_sizing_pass() || !ui.input(|input| input.pointer.primary_pressed())
+    {
+        return None;
+    }
+    let position = primary_press(ui.ctx())?;
+    if !canvas.intersect(ui.clip_rect()).contains(position)
+        || ui.ctx().layer_id_at(position) != Some(ui.layer_id())
+    {
+        return None;
+    }
+    // An overlapping later Clip owns this position even when it isn't automation.
+    for other in clips.iter().rev() {
+        if other.id == clip.id {
+            return Some(position);
+        }
+        let left =
+            canvas.left() + viewport.x.pixel_for_content(f64::from(other.start)) as f32 + 1.0;
+        let top = canvas.top() + viewport.y.pixel_for_content(other.track as f64) as f32 + 4.0;
+        let rect = Rect::from_min_size(
+            Pos2::new(left, top),
+            Vec2::new(
+                (f64::from(other.length) * viewport.x.pixels_per_unit() - 2.0).max(4.0) as f32,
+                viewport.y.pixels_per_unit() as f32 - 8.0,
+            ),
+        )
+        .intersect(canvas);
+        if rect.contains(position) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Reserve the raw press before any Clip can select, move, resize, or fade from
+/// egui's final-position hit. This also protects earlier Clips in paint order.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reserve_primary_handle(
+    ui: &egui::Ui,
+    clips: &[Clip],
+    lanes: &[ProjectAutomation],
+    selection: &HashSet<u32>,
+    viewport: Viewport2D,
+    canvas: Rect,
+    session: u64,
+) -> Option<Id> {
+    let (view_start, view_end) = viewport.x.visible_range();
+    for clip in clips.iter().rev() {
+        if clip.kind != ClipKind::Automation
+            || !selection.contains(&clip.id)
+            || !valid_clip_span(clip)
+            || clip.track >= PLAYLIST_TRACK_COUNT
+            || !content_span_is_visible(viewport.y, clip.track as f64, clip.track as f64 + 1.0)
+        {
+            continue;
+        }
+        let Some(press) = batched_clip_press(ui, clip, clips, viewport, canvas) else {
+            continue;
+        };
+        let Some(automation) = lanes
+            .iter()
+            .find(|lane| Some(lane.id) == clip.automation_id)
+        else {
+            continue;
+        };
+        let start = clip.start.max(view_start as f32);
+        let end = (clip.start + clip.length).min(view_end as f32);
+        if end <= start {
+            continue;
+        }
+        let left = canvas.left() + viewport.x.pixel_for_content(f64::from(start)) as f32;
+        let right = canvas.left() + viewport.x.pixel_for_content(f64::from(end)) as f32;
+        let clip_rect = Rect::from_min_size(
+            Pos2::new(
+                left + 1.0,
+                canvas.top() + viewport.y.pixel_for_content(clip.track as f64) as f32 + 4.0,
+            ),
+            Vec2::new(
+                ((end - start) * viewport.x.pixels_per_unit() as f32 - 2.0).max(4.0),
+                viewport.y.pixels_per_unit() as f32 - 8.0,
+            ),
+        )
+        .intersect(canvas);
+        let curve = Rect::from_min_max(
+            Pos2::new(
+                left,
+                clip_rect.top()
+                    + if clip_rect.height() >= 28.0 {
+                        14.0
+                    } else {
+                        2.0
+                    },
+            ),
+            Pos2::new(right, clip_rect.bottom() - 2.0),
+        );
+        let range = automation.lane.value_range();
+        let position = |source: f64, value: f64| {
+            let time = f64::from(clip.start) + source - f64::from(clip.source_offset);
+            Pos2::new(
+                canvas.left() + viewport.x.pixel_for_content(time) as f32,
+                curve.bottom() - range.normalize(value) as f32 * curve.height(),
+            )
+        };
+        let nodes = automation
+            .lane
+            .points()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, point)| {
+                let time = clip.start + (point.position as f32 - clip.source_offset);
+                (time >= start && time <= end).then(|| {
+                    (
+                        index,
+                        Rect::from_center_size(
+                            Pos2::new(
+                                canvas.left()
+                                    + viewport.x.pixel_for_content(f64::from(time)) as f32,
+                                curve.bottom()
+                                    - range.normalize(point.value) as f32 * curve.height(),
+                            ),
+                            Vec2::splat(12.0),
+                        ),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let clip_id = Id::new(("playlist-clip", clip.id));
+        let owner = nodes
+            .iter()
+            .rev()
+            .find(|(_, hit)| hit.contains(press))
+            .map(|(index, _)| clip_id.with(("automation-point", session, *index)))
+            .or_else(|| {
+                if curve.width() < 2.0
+                    || curve.height() < 2.0
+                    || clips.iter().filter(|other| other.id == clip.id).count() != 1
+                    || lanes
+                        .iter()
+                        .filter(|other| other.id == automation.id)
+                        .count()
+                        != 1
+                {
+                    return None;
+                }
+                (0..automation.lane.points().len().saturating_sub(1))
+                    .rev()
+                    .find_map(|index| {
+                        let (source, value) = tension_handle(
+                            &automation.lane,
+                            index,
+                            clip,
+                            viewport.x.pixels_per_unit() as f32,
+                        )?;
+                        let hit =
+                            Rect::from_center_size(position(source, value), Vec2::splat(12.0));
+                        (hit.contains(press)
+                            && canvas.contains_rect(hit)
+                            && !nodes.iter().any(|(_, node)| hit.intersects(*node)))
+                        .then(|| clip_id.with(("automation-tension", session, index)))
+                    })
+            });
+        if let Some(owner) = owner {
+            // A completed down/move/up batch has no native held pointer left.
+            // Synthesizing a drag after its release would leave a phantom owner.
+            if ui.input(|input| input.pointer.primary_down()) {
+                ui.ctx().set_dragged_id(owner);
+            }
+            return Some(owner);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct PointReference {
     pub clip_id: u32,

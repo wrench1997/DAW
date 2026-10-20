@@ -23,6 +23,7 @@ fn owned_native_callback_sustains_without_os_midi_and_releases_only_its_voice() 
     // A paused, unrelated timeline/native voice must not advance merely because
     // the keyboard becomes audible. Its track PDC history must freeze too.
     callback.dsp.voices[31] = Voice {
+        sampler: None,
         phase: 0.23, phase_step: 0.01, envelope: 0.5, decay: 0.999,
         active: true, mixer_track: 3, timeline_note_id: Some(991),
         timeline_channel_id: Some(9), audition_token_id: None,

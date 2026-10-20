@@ -3142,6 +3142,7 @@ pub(crate) fn validate_timeline(
         .audio_clips()
         .iter()
         .map(|clip| clip.asset_id)
+        .chain(timeline.sampler_asset_ids())
         .collect::<BTreeSet<_>>()
         .len();
     validate_resource(
@@ -3909,6 +3910,7 @@ mod tests {
             solo: false,
             mixer_track: 1,
             instrument_plugin_instance_id: Some(1),
+            sampler: None,
             steps: [false; 16],
         });
         project.patterns.push(Pattern {
@@ -3993,6 +3995,7 @@ mod tests {
                 solo: false,
                 mixer_track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
                 instrument_plugin_instance_id: Some(instance_id),
+                sampler: None,
                 steps: [false; 16],
             });
         }
@@ -4072,6 +4075,7 @@ mod tests {
             solo: false,
             mixer_track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
             instrument_plugin_instance_id: Some(1),
+            sampler: None,
             steps: [false; 16],
         });
         let quantum_beat = TIMELINE_PLUGIN_FIXED_QUANTUM_FRAMES as f32 / 24_000.0;
@@ -4163,6 +4167,7 @@ mod tests {
                 solo: false,
                 mixer_track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
                 instrument_plugin_instance_id: Some(instance_id),
+                sampler: None,
                 steps: [false; 16],
             });
         }
@@ -4252,6 +4257,7 @@ mod tests {
 
     fn synthetic_chased_note(note_id: u64, channel_id: u32) -> ChasedNote {
         ChasedNote {
+            elapsed_frames: 0,
             note_id,
             channel_id,
             note: (note_id % 128) as u8,
@@ -4290,6 +4296,7 @@ mod tests {
             solo: false,
             mixer_track: 1,
             instrument_plugin_instance_id: None,
+            sampler: None,
             steps: [false; 16],
         });
         let mut steps = [false; 16];

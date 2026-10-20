@@ -352,7 +352,7 @@ fn piano_expression_properties_minimum_floating_and_inspector_same_editor() {
     ui.settle();
     ui.app.piano_viewport.y.reveal(63.0, 68.0, 0.0).unwrap();
     ui.settle();
-    // The minimum layout hides the Inspector; double-click still reaches the full editor.
+    // Double-click and the visible Inspector both reach the full editor at minimum size.
     let pos = body(&ui, 90001);
     double_click(&mut ui, pos);
     for label in ["Apply", "Cancel", "Reset"] {

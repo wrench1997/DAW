@@ -484,7 +484,7 @@ fn piano_mouse_window_chrome_and_covered_background_never_start_notes() {
         egui::Modifiers::CTRL,
     );
     assert_eq!(project_fingerprint(&ui.app.project), before);
-    ui.click("Cascade windows");
+    ui.workspace_action("Cascade windows");
     ui.key(egui::Key::F5, egui::Modifiers::NONE);
     let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
     let playlist = ui.editor_rect(StudioView::Playlist);
@@ -962,7 +962,7 @@ fn piano_mouse_batched_paint_includes_mouse_down_cell_and_covered_press_stays_sa
         );
     }
     assert_eq!(ui.app.undo_stack.len(), 1);
-    ui.click("Cascade windows");
+    ui.workspace_action("Cascade windows");
     ui.key(egui::Key::F5, egui::Modifiers::NONE);
     let covered = ui
         .ctx

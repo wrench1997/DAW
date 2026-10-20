@@ -4321,6 +4321,7 @@ fn command_emits_asset_event(command: &AudioCommand) -> bool {
 
 #[derive(Clone, Copy, Default)]
 struct Voice {
+    sampler: Option<(usize, crate::sampler::SamplerVoice)>,
     phase: f32,
     phase_step: f32,
     envelope: f32,
@@ -5303,6 +5304,7 @@ fn mixer_manifest_matches(
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TimelineChannelRenderBase {
+    sampler: Option<crate::sampler::SamplerConfig>,
     channel_id: u32,
     volume: f32,
     pan: f32,
@@ -5317,6 +5319,7 @@ struct TimelineChannelRenderBase {
 impl From<ChannelBaseDescriptor> for TimelineChannelRenderBase {
     fn from(base: ChannelBaseDescriptor) -> Self {
         Self {
+            sampler: base.sampler,
             channel_id: base.channel_id,
             volume: base.volume,
             pan: base.pan,
@@ -8650,6 +8653,7 @@ impl DspState {
                 let frequency = 440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0);
                 self.next_voice = self.next_non_audition_voice();
                 self.voices[self.next_voice] = Voice {
+                    sampler: None,
                     phase: 0.0,
                     phase_step: frequency / self.sample_rate,
                     envelope: finite_clamp(velocity, 0.0, 1.0, 0.0) * 0.28,
@@ -9345,6 +9349,32 @@ impl DspState {
         **graph_pdc_activation_plan = Some(next_graph_pdc_plan);
         *graph_pdc_activation_revision = Some(next_graph_pdc_revision);
 
+        for config in timeline
+            .channel_bases()
+            .iter()
+            .filter_map(|base| base.sampler)
+        {
+            let Some(asset_id) = config.asset_id else {
+                continue;
+            };
+            let asset = audio_assets
+                .iter()
+                .find(|slot| slot.samples.is_some() && slot.id == asset_id)
+                .ok_or(TimelineTransportActivationRejectReason::MissingAudioAsset { asset_id })?;
+            if !(1..=2).contains(&asset.channels)
+                || crate::sampler::SamplerVoice::new(
+                    config,
+                    config.root_note,
+                    1.0,
+                    asset.sample_rate,
+                    asset.sample_rate,
+                    asset.frames,
+                )
+                .is_none()
+            {
+                return Err(TimelineTransportActivationRejectReason::ChannelBaseTable);
+            }
+        }
         for clip in timeline.audio_clips() {
             if !audio_assets
                 .iter()
@@ -10368,6 +10398,7 @@ impl DspState {
         self.plugin_output_left.fill(poison[0]);
         self.plugin_output_right.fill(poison[1]);
         self.voices[0] = Voice {
+            sampler: None,
             phase: 0.25,
             phase_step: 0.0,
             envelope: 1.0,
@@ -12642,6 +12673,11 @@ impl DspState {
         }
         let frames = samples.len() / usize::from(channels);
         if let Some(index) = self.find_asset_slot(id) {
+            for voice in &mut self.voices {
+                if voice.sampler.is_some_and(|(slot, _)| slot == index) {
+                    voice.active = false;
+                }
+            }
             let slot = &mut self.audio_assets[index];
             let old_samples = slot.samples.replace(samples);
             slot.sample_rate = sample_rate;
@@ -12680,6 +12716,11 @@ impl DspState {
                 voice.active = false;
             }
         }
+        for voice in &mut self.voices {
+            if voice.sampler.is_some_and(|(slot, _)| slot == index) {
+                voice.active = false;
+            }
+        }
         let samples = self.audio_assets[index].samples.take();
         self.audio_assets[index] = AudioAssetSlot::default();
         if let Some(samples) = samples {
@@ -12689,6 +12730,11 @@ impl DspState {
     }
 
     fn clear_assets(&mut self, retired_assets: &mut Producer<Arc<[f32]>>) -> usize {
+        for voice in &mut self.voices {
+            if voice.sampler.is_some() {
+                voice.active = false;
+            }
+        }
         for voice in &mut self.audio_voices {
             voice.active = false;
         }
@@ -12850,14 +12896,59 @@ impl DspState {
         }
     }
 
+    fn prepare_sampler_voice(
+        &self,
+        channel_id: u32,
+        note: u8,
+        velocity: f32,
+    ) -> Result<Option<(usize, crate::sampler::SamplerVoice)>, ()> {
+        let Some(config) = self
+            .timeline_channel_bases
+            .get(channel_id)
+            .and_then(|base| base.sampler)
+        else {
+            return Ok(None);
+        };
+        // An explicitly empty sampler is silent, never the oscillator fallback.
+        let asset_id = config.asset_id.ok_or(())?;
+        let slot = self.find_asset_slot(asset_id).ok_or(())?;
+        let asset = &self.audio_assets[slot];
+        if !(1..=2).contains(&asset.channels) {
+            return Err(());
+        }
+        let voice = crate::sampler::SamplerVoice::new(
+            config,
+            note,
+            velocity,
+            asset.sample_rate,
+            self.sample_rate as u32,
+            asset.frames,
+        )
+        .ok_or(())?;
+        Ok(Some((slot, voice)))
+    }
+
     fn start_timeline_native_note(&mut self, note: ChasedNote) {
+        let Ok(mut sampler) = self.prepare_sampler_voice(note.channel_id, note.note, note.velocity)
+        else {
+            return;
+        };
+        if let Some((_, voice)) = &mut sampler {
+            voice.chase(note.elapsed_frames);
+        }
+
         let frequency = 440.0 * 2.0_f32.powf((note.note as f32 - 69.0) / 12.0);
         self.next_voice = self.next_non_audition_voice();
         self.voices[self.next_voice] = Voice {
+            sampler,
             phase: 0.0,
             phase_step: frequency / self.sample_rate,
-            envelope: (note.velocity * note.gain).clamp(0.0, 1.0) * 0.28,
-            decay: 0.99984,
+            envelope: if sampler.is_some() {
+                note.gain
+            } else {
+                (note.velocity * note.gain).clamp(0.0, 1.0) * 0.28
+            },
+            decay: if sampler.is_some() { 1.0 } else { 0.99984 },
             active: true,
             mixer_track: usize::from(note.mixer_track).min(TRACK_COUNT - 1),
             timeline_note_id: Some(note.note_id),
@@ -12873,9 +12964,13 @@ impl DspState {
             .iter_mut()
             .find(|voice| voice.active && voice.timeline_note_id == Some(note_id))
         {
-            voice.active = false;
-            voice.timeline_note_id = None;
-            voice.timeline_channel_id = None;
+            if let Some((_, sampler)) = &mut voice.sampler {
+                sampler.release();
+            } else {
+                voice.active = false;
+                voice.timeline_channel_id = None;
+                voice.timeline_note_id = None;
+            }
         }
     }
 
@@ -13051,15 +13146,25 @@ impl DspState {
                         )
                     },
                 );
-            let sample = (fundamental + harmonic) * voice.envelope * volume;
+            let samples = if let Some((slot, sampler)) = &mut voice.sampler {
+                let asset = &self.audio_assets[*slot];
+                let output = asset.samples.as_ref().map_or([0.0; 2], |pcm| {
+                    sampler.next_frame(pcm, usize::from(asset.channels))
+                });
+                voice.active = sampler.is_active() && asset.samples.is_some();
+                output
+            } else {
+                [fundamental + harmonic; 2]
+            };
+            let gain = voice.envelope * volume;
             let bus = &mut self.track_block[track * MAX_MIXER_BLOCK_FRAMES + frame_index];
             if audible {
-                bus[0] += sample * if pan > 0.0 { 1.0 - pan } else { 1.0 };
-                bus[1] += sample * if pan < 0.0 { 1.0 + pan } else { 1.0 };
+                bus[0] += samples[0] * gain * if pan > 0.0 { 1.0 - pan } else { 1.0 };
+                bus[1] += samples[1] * gain * if pan < 0.0 { 1.0 + pan } else { 1.0 };
             }
             voice.phase = (voice.phase + voice.phase_step).fract();
             voice.envelope *= voice.decay;
-            if voice.envelope < 0.0001 {
+            if !voice.active || voice.envelope < 0.0001 {
                 voice.active = false;
                 voice.audition_token_id = None;
             }
@@ -16373,6 +16478,7 @@ mod tests {
             .stats()
             .callbacks;
         dsp.voices[0] = Voice {
+            sampler: None,
             active: true,
             phase: 0.25,
             phase_step: 0.01,
@@ -16854,7 +16960,7 @@ mod tests {
         )
     }
 
-    fn timeline_test_project(length_beats: f32) -> Project {
+    pub(super) fn timeline_test_project(length_beats: f32) -> Project {
         Project {
             format_version: 2,
             name: "Audio callback timeline test".into(),
@@ -16889,6 +16995,7 @@ mod tests {
             solo: false,
             mixer_track: crate::model::mixer_track_id_for_runtime_slot(mixer_track.min(31) as u8),
             instrument_plugin_instance_id: None,
+            sampler: None,
             steps: [false; 16],
         }
     }
@@ -16966,6 +17073,7 @@ mod tests {
 
     fn install_constant_timeline_voice(dsp: &mut DspState, channel_id: u32, mixer_track: usize) {
         dsp.voices[0] = Voice {
+            sampler: None,
             phase: 0.25,
             phase_step: 0.0,
             envelope: 1.0,
@@ -16986,7 +17094,7 @@ mod tests {
         }
     }
 
-    fn compile_timeline_test_project(project: &Project) -> Arc<CompiledTimeline> {
+    pub(super) fn compile_timeline_test_project(project: &Project) -> Arc<CompiledTimeline> {
         let tempo_map = TempoMap::from_project(project, 48_000).unwrap();
         Arc::new(
             CompiledTimeline::from_project(
@@ -17058,7 +17166,7 @@ mod tests {
             .unwrap()
     }
 
-    fn install_and_activate_timeline(
+    pub(super) fn install_and_activate_timeline(
         timeline: Arc<CompiledTimeline>,
         revision: u64,
         epoch: u64,
@@ -17434,6 +17542,7 @@ mod tests {
         reader.poll(now, Some(identity), 0, 48_000);
         dsp.meter_publisher = Some(publisher);
         dsp.voices[0] = Voice {
+            sampler: None,
             phase: 0.25,
             phase_step: 0.0,
             envelope: 0.25,
@@ -17724,6 +17833,7 @@ mod tests {
                 .stage(FrameEvent::midi(0, Some(0), [0x90, 60, 127]))
         );
         dsp.voices[0] = Voice {
+            sampler: None,
             phase: 0.25,
             phase_step: 0.01,
             envelope: 1.0,
@@ -18239,6 +18349,7 @@ mod tests {
 
     fn chased_note(note_id: u64, channel_id: u32, note: u8) -> ChasedNote {
         ChasedNote {
+            elapsed_frames: 0,
             note_id,
             channel_id,
             note,
@@ -18272,6 +18383,7 @@ mod tests {
                 },
             }],
             &[ChannelBaseDescriptor {
+                sampler: None,
                 channel_id,
                 volume: 1.0,
                 pan: 0.0,
@@ -21302,6 +21414,7 @@ mod tests {
         for index in 0..MAX_TIMELINE_PLANNED_EVENTS {
             plan.note_on(
                 ChasedNote {
+                    elapsed_frames: 0,
                     note_id: index as u64 + 1,
                     ..note
                 },
@@ -21312,6 +21425,7 @@ mod tests {
         assert!(!plan.overflowed);
         plan.note_on(
             ChasedNote {
+                elapsed_frames: 0,
                 note_id: MAX_TIMELINE_PLANNED_EVENTS as u64 + 1,
                 ..note
             },
@@ -21453,6 +21567,7 @@ mod tests {
                     source,
                 } => plan.note_on(
                     ChasedNote {
+                        elapsed_frames: 0,
                         note_id,
                         channel_id,
                         note,
@@ -21471,6 +21586,7 @@ mod tests {
                     source,
                 } => plan.note_off(
                     ChasedNote {
+                        elapsed_frames: 0,
                         note_id,
                         channel_id,
                         note,
@@ -21527,6 +21643,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, (pitch, velocity, gain))| ChasedNote {
+                elapsed_frames: 0,
                 velocity,
                 gain,
                 source: NoteSourceDescriptor::LegacyPiano {
@@ -21576,6 +21693,7 @@ mod tests {
     fn instrument_bounce_midi_matches_callback_retriggers_and_last_pitch_reference() {
         let first = chased_note(11, 7, 64);
         let retrigger = ChasedNote {
+            elapsed_frames: 0,
             velocity: 0.5,
             source: NoteSourceDescriptor::LegacyPiano {
                 clip_id: 21,
@@ -21587,6 +21705,7 @@ mod tests {
             ..chased_note(12, 7, 64)
         };
         let other_pitch = ChasedNote {
+            elapsed_frames: 0,
             source: NoteSourceDescriptor::ChannelStep {
                 clip_id: 22,
                 pattern_id: 32,
@@ -21620,6 +21739,7 @@ mod tests {
     fn instrument_bounce_midi_matches_callback_off_before_on_across_q128_boundary() {
         let first = chased_note(21, 7, 64);
         let second = ChasedNote {
+            elapsed_frames: 0,
             source: NoteSourceDescriptor::ChannelStep {
                 clip_id: 2,
                 pattern_id: 3,
@@ -21629,6 +21749,7 @@ mod tests {
             ..chased_note(22, 7, 64)
         };
         let third = ChasedNote {
+            elapsed_frames: 0,
             source: NoteSourceDescriptor::LegacyPiano {
                 clip_id: 5,
                 pattern_id: 6,
@@ -23285,6 +23406,7 @@ mod tests {
         let mut dsp = DspState::new(48_000.0);
         assert!(dsp.timeline_channel_bases.reset_from(&[
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 1,
                 volume: 0.5,
                 pan: 1.0,
@@ -23293,6 +23415,7 @@ mod tests {
                 mixer_track: 2,
             },
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 2,
                 volume: 1.0,
                 pan: 0.0,
@@ -23317,6 +23440,7 @@ mod tests {
 
         assert!(dsp.timeline_channel_bases.reset_from(&[
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 1,
                 volume: 1.0,
                 pan: 0.0,
@@ -23325,6 +23449,7 @@ mod tests {
                 mixer_track: 2,
             },
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 2,
                 volume: 1.0,
                 pan: 0.0,
@@ -23366,6 +23491,7 @@ mod tests {
         });
         assert!(dsp.timeline_channel_bases.reset_from(&[
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 9,
                 volume: 0.5,
                 pan: 1.0,
@@ -23374,6 +23500,7 @@ mod tests {
                 mixer_track: 2,
             },
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 10,
                 volume: 1.0,
                 pan: 0.0,
@@ -23411,6 +23538,7 @@ mod tests {
 
         assert!(dsp.timeline_channel_bases.reset_from(&[
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 9,
                 volume: 1.0,
                 pan: 0.0,
@@ -23419,6 +23547,7 @@ mod tests {
                 mixer_track: 2,
             },
             ChannelBaseDescriptor {
+                sampler: None,
                 channel_id: 10,
                 volume: 1.0,
                 pan: 0.0,
@@ -26282,3 +26411,7 @@ mod tests {
         include!("audio_genuine_topology_tests.rs");
     }
 }
+
+#[cfg(test)]
+#[path = "audio_sampler_tests.rs"]
+mod sampler_tests;

@@ -15,6 +15,8 @@ mod pattern_placement;
 #[cfg(test)]
 #[path = "model/pattern_placement_tests.rs"]
 mod pattern_placement_tests;
+#[path = "model/playlist_deletion.rs"]
+mod playlist_deletion;
 pub use pattern_placement::PatternLengthPolicy;
 
 use crate::automation::{AutomationLane, AutomationPoint, AutomationTarget};
@@ -28,7 +30,7 @@ const PROJECT_SAVE_TEMP_ATTEMPTS: usize = 128;
 static PROJECT_SAVE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk project schema written by Citrus Studio.
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 14;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 15;
 
 const LEGACY_PROJECT_FORMAT_VERSION: u32 = 1;
 
@@ -163,6 +165,8 @@ pub struct Channel {
     /// remains the runtime fallback until the plug-in audio graph is wired.
     #[serde(default)]
     pub instrument_plugin_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<crate::sampler::SamplerConfig>,
     pub steps: [bool; 16],
 }
 
@@ -851,6 +855,7 @@ impl Project {
             solo: false,
             mixer_track: 1,
             instrument_plugin_instance_id: None,
+            sampler: None,
             steps: [false; 16],
         };
         let pattern = Pattern {
@@ -1030,6 +1035,42 @@ impl Project {
     /// Exact split metadata cannot be repaired without changing what is heard.
     /// Validate it before normalization or any save-side filesystem changes.
     fn validate_audio_references(&self) -> Result<()> {
+        for channel in &self.channels {
+            if let Some(config) = channel.sampler {
+                anyhow::ensure!(
+                    config.is_valid(),
+                    "Channel {} has invalid sampler ADSR/root settings",
+                    channel.id
+                );
+                anyhow::ensure!(
+                    channel.instrument_plugin_instance_id.is_none(),
+                    "Channel {} assigns both sampler and VST generator",
+                    channel.id
+                );
+                if let Some(asset) = self
+                    .audio_assets
+                    .iter()
+                    .find(|asset| Some(asset.id) == config.asset_id)
+                {
+                    anyhow::ensure!(
+                        (1..=2).contains(&asset.channels)
+                            && usize::try_from(asset.frames)
+                                .ok()
+                                .and_then(|frames| crate::sampler::SamplerVoice::new(
+                                    config,
+                                    config.root_note,
+                                    1.0,
+                                    asset.sample_rate,
+                                    asset.sample_rate,
+                                    frames
+                                ))
+                                .is_some(),
+                        "Channel {} has invalid sampler source range, loop, or audio format",
+                        channel.id
+                    );
+                }
+            }
+        }
         for clip in &self.clips {
             anyhow::ensure!(
                 clip.audio_length_reference
@@ -1069,6 +1110,13 @@ impl Project {
         anyhow::ensure!(
             !self.auto_song_length || self.format_version >= 13,
             "Automatic song length requires project format 13; normalize the project before saving"
+        );
+        anyhow::ensure!(
+            self.channels
+                .iter()
+                .all(|channel| channel.sampler.is_none())
+                || self.format_version >= 15,
+            "Native sampler requires project format 15; normalize the project before saving"
         );
         self.validate_pattern_length_policies()?;
         self.validate_persisted_numbers()
@@ -2084,6 +2132,7 @@ fn channel(id: u32, name: &str, color: [u8; 3], steps: [bool; 16]) -> Channel {
         solo: false,
         mixer_track: u64::from(id) + 1,
         instrument_plugin_instance_id: None,
+        sampler: None,
         steps,
     }
 }

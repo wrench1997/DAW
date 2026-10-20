@@ -10,7 +10,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{PianoNote, normalize_piano_note_groups};
+use crate::model::{Pattern, PianoNote, normalize_piano_note_groups};
 
 pub const MIN_NOTE_LENGTH_BEATS: f32 = 1.0 / 64.0;
 pub const MAX_TRANSFORM_NOTES: usize = 65_536;
@@ -259,6 +259,59 @@ impl PianoTimeRange {
     }
 }
 
+/// Session-only visual reference. IDs survive Pattern reorder/rename.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PianoGhostSource {
+    #[default]
+    CurrentPattern,
+    ReferencePattern(u32),
+}
+
+impl PianoGhostSource {
+    /// A removed source falls back to current-Pattern context, never an index neighbor.
+    pub fn resolved(self, patterns: &[Pattern]) -> Self {
+        match self {
+            Self::ReferencePattern(id) if !patterns.iter().any(|pattern| pattern.id == id) => {
+                Self::CurrentPattern
+            }
+            source => source,
+        }
+    }
+
+    /// Read-only references at their original Pattern-local beats; no repeat or offset.
+    /// If the source is also current, exclude the editable Channel to avoid duplicates.
+    pub fn notes(
+        self,
+        visible: bool,
+        patterns: &[Pattern],
+        current_index: usize,
+        target_channel: Option<u32>,
+    ) -> Vec<&PianoNote> {
+        if !visible || patterns.is_empty() {
+            return Vec::new();
+        }
+        let current_index = current_index.min(patterns.len() - 1);
+        let source_index = match self.resolved(patterns) {
+            Self::CurrentPattern => current_index,
+            Self::ReferencePattern(id) => patterns
+                .iter()
+                .position(|p| p.id == id)
+                .unwrap_or(current_index),
+        };
+        patterns[source_index]
+            .notes
+            .iter()
+            .filter(|note| {
+                (source_index != current_index || note.channel_id != target_channel)
+                    && note.note <= 127
+                    && note.start.is_finite()
+                    && note.length.is_finite()
+                    && note.length > 0.0
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PianoRollState {
     pub tool: PianoRollTool,
@@ -268,6 +321,7 @@ pub struct PianoRollState {
     pub repeat_range: Option<PianoTimeRange>,
     pub range_owner: Option<(u64, usize, u32, Option<u32>)>,
     pub ghosts_visible: bool,
+    pub ghost_source: PianoGhostSource,
     pub grouping_enabled: bool,
     pub scale_root: u8,
     pub scale: PianoScale,
@@ -298,6 +352,7 @@ impl PianoRollState {
             repeat_range: None,
             range_owner: None,
             ghosts_visible: true,
+            ghost_source: PianoGhostSource::CurrentPattern,
             grouping_enabled: true,
             scale_root: preferences.scale_root,
             scale: preferences.scale,
@@ -4044,5 +4099,119 @@ mod selection_lookup_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ghost_reference_tests {
+    use super::*;
+
+    fn pattern(id: u32) -> Pattern {
+        Pattern {
+            id,
+            name: format!("Pattern {id}"),
+            length_steps: 16,
+            channel_steps: vec![],
+            notes: [Some(1), Some(2), None]
+                .into_iter()
+                .enumerate()
+                .map(|(i, channel_id)| PianoNote {
+                    id: u64::from(id) * 10 + i as u64,
+                    channel_id,
+                    group_id: None,
+                    note: 60 + i as u8,
+                    start: 0.375 + i as f32,
+                    length: 0.625,
+                    velocity: 0.75,
+                    selected: false,
+                    muted: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn ghost_current_scope_excludes_only_editable_channel_and_off_is_empty() {
+        let patterns = vec![pattern(1), pattern(2)];
+        let source = PianoGhostSource::CurrentPattern;
+        assert_eq!(
+            source
+                .notes(true, &patterns, 0, Some(1))
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>(),
+            [11, 12]
+        );
+        assert_eq!(
+            source
+                .notes(true, &patterns, 0, None)
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>(),
+            [10, 11]
+        );
+        assert!(source.notes(false, &patterns, 0, Some(1)).is_empty());
+        assert!(source.notes(true, &[], 0, None).is_empty());
+    }
+
+    #[test]
+    fn ghost_reference_is_all_channels_at_original_local_beats_and_never_mutates() {
+        let patterns = vec![pattern(1), pattern(2)];
+        let before = serde_json::to_string(&patterns).unwrap();
+        let source = PianoGhostSource::ReferencePattern(2);
+        let notes = source.notes(true, &patterns, 0, Some(1));
+        assert_eq!(notes.iter().map(|n| n.id).collect::<Vec<_>>(), [20, 21, 22]);
+        assert_eq!(notes[0].start, 0.375);
+        assert_eq!(notes[0].length, 0.625);
+        assert!(std::ptr::eq(notes[0], &patterns[1].notes[0]));
+        assert!(source.notes(false, &patterns, 0, Some(1)).is_empty());
+        assert_eq!(serde_json::to_string(&patterns).unwrap(), before);
+    }
+
+    #[test]
+    fn ghost_source_survives_rename_reorder_and_current_switch_without_duplicate_target() {
+        let mut patterns = vec![pattern(1), pattern(2)];
+        let source = PianoGhostSource::ReferencePattern(2);
+        patterns[1].name = "Renamed".into();
+        patterns.swap(0, 1);
+        assert_eq!(source.resolved(&patterns), source);
+        assert_eq!(source.notes(true, &patterns, 1, Some(1))[0].id, 20);
+        assert_eq!(
+            source
+                .notes(true, &patterns, 0, Some(1))
+                .iter()
+                .map(|n| n.id)
+                .collect::<Vec<_>>(),
+            [21, 22]
+        );
+        patterns.remove(0);
+        assert_eq!(source.resolved(&patterns), PianoGhostSource::CurrentPattern);
+        assert_eq!(source.notes(true, &patterns, 0, Some(1))[0].id, 11);
+    }
+
+    #[test]
+    fn ghost_references_ignore_invalid_note_geometry() {
+        let mut patterns = vec![pattern(1), pattern(2)];
+        patterns[1].notes[0].start = f32::NAN;
+        patterns[1].notes[1].length = -1.0;
+        patterns[1].notes[2].note = 255;
+        assert!(
+            PianoGhostSource::ReferencePattern(2)
+                .notes(true, &patterns, 0, None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ghost_scope_is_session_state_not_persisted_preferences() {
+        let mut state = PianoRollState::default();
+        let preferences = state.preferences();
+        state.ghost_source = PianoGhostSource::ReferencePattern(7);
+        state.ghosts_visible = false;
+        assert_eq!(state.preferences(), preferences);
+        assert_eq!(
+            PianoRollState::from_preferences(preferences).ghost_source,
+            PianoGhostSource::CurrentPattern
+        );
     }
 }

@@ -347,3 +347,18 @@ fixture exclusion,26doctests,239Python,fmt/two strict rootClippy modes/build/hel
 smoke andbothMSVCsource checks pass. New exact Windows CI remains pending. Old parameter costs and
 optimized244f622 timing remain historically attributed; event admission carries no
 new payload-allocation, threading, realtime or native-resize qualification.
+
+### Linux native file-dialog runtime requirement (2026-10-17)
+
+The default Linux rfd 0.17 path requires a working XDG Desktop Portal FileChooser
+service, or its Zenity fallback, for native Open/Save/import/export path selection.
+An installed XFCE desktop or portal configuration file alone does not supply the
+service/backend executable. Qualify the actual chooser on the target image;
+source builds and offscreen tests do not establish that the native dialog works.
+
+The 2026-10-17 cloud desktop image has neither the required portal backend nor
+Zenity. Actual Save attempts returned no path and the current App treated that
+like cancellation. Project serialization/recovery tests still work, but native
+chooser acceptance is blocked there. This observation must not be generalized
+to Windows. No runtime dependency installation or system configuration change
+was performed during that usability session.
