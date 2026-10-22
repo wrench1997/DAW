@@ -117,6 +117,46 @@ fn options(tail_milliseconds: u32) -> WavExportOptions {
     }
 }
 
+#[test]
+fn midi_drop_sampler_saved_score_exports_exact_note_gate_and_velocity() {
+    let mut files = Files::new();
+    let mut source = files.project(8_000, 1, &vec![8_192; 8_000]);
+    // Unlike the small render-only fixture, saved v8 projects require all 32 inserts.
+    let defaults = Project::default();
+    source.mixer_tracks = defaults.mixer_tracks;
+    source.mixer_routes = defaults.mixer_routes;
+    for track in &mut source.mixer_tracks {
+        track.volume = 1.0;
+        track.pan = 0.0;
+        track.muted = false;
+        track.solo = false;
+    }
+    source.patterns[0].notes[0].length = 0.25;
+    source.patterns[0].notes[0].velocity = 64.0 / 127.0;
+    let channel = source.channels[0].id;
+    let bytes = crate::midi::export_active_pattern(
+        &source,
+        &crate::midi::MidiExportOptions {
+            channel_map: crate::midi::MidiExportChannelMap::try_new([(channel, 7)]).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut target = source.clone();
+    target.patterns[0].notes.clear();
+    target.tempo = 120.0;
+    crate::midi::append_to_channel(&mut target, &bytes, channel).unwrap();
+    assert_eq!(target.tempo, 120.0);
+    let path = files.path("midi-drop.citrus");
+    target.save(&path).unwrap();
+    let reopened = Project::load(&path).unwrap();
+    let (pcm, _) = files.render(&reopened, 0);
+    // 0.25 beat at 120 BPM = 1000 frames at 8 kHz, not the source SMF's 60 BPM.
+    close(pcm[100][0], 0.25 * 64.0 / 127.0);
+    assert!(pcm[..1000].iter().all(|frame| frame[0] > 0.0));
+    assert!(pcm[1000..].iter().all(|frame| *frame == [0.0; 2]));
+}
+
 #[track_caller]
 fn close(actual: f32, expected: f32) {
     assert!(

@@ -595,6 +595,9 @@ impl CitrusApp {
                 );
             });
             ui.separator();
+            let midi_zone = ui.add_enabled(available, egui::Button::new("Drop MIDI notes here (append at beat 1)"));
+            midi_zone.clone().on_hover_text("Appends notes to this instrument in the active Pattern. Existing notes, BPM and WAV stay unchanged. Undo removes the drop.");
+            self.midi_drop_target(ui, midi_zone.rect, channel_id);
             let peaks = asset
                 .as_ref()
                 .map(|asset| {

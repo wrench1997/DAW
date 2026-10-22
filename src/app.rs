@@ -8,6 +8,7 @@ mod clip_render_job;
 mod clip_render_playback;
 mod clip_render_session;
 mod generator_loaded_identity;
+mod midi_drop;
 mod plugin_initialization;
 mod stopped_bounce_capture;
 use generator_loaded_identity::GeneratorReadiness;
@@ -24264,6 +24265,7 @@ impl CitrusApp {
         let mut audition = Vec::new();
         let mut automation_request = None;
         let mut channel_selection_changed = false;
+        let mut midi_drop_row = None;
         let mut open_piano_channel = None;
         let mut open_sampler_channel = None;
         let notes = [36_u8, 39, 54, 43, 64];
@@ -24304,7 +24306,7 @@ impl CitrusApp {
                     } else {
                         theme::PANEL
                     };
-                    egui::Frame::NONE
+                    let row_response = egui::Frame::NONE
                         .fill(row_fill)
                         .corner_radius(4)
                         .inner_margin(egui::Margin::symmetric(4, 2))
@@ -24560,6 +24562,9 @@ impl CitrusApp {
                                 }
                             });
                         });
+                    if ui.rect_contains_pointer(row_response.response.rect) {
+                        midi_drop_row = Some((row_response.response.rect, channel.id));
+                    }
                     ui.add_space(0.0);
                 }
                 ui.add_space(4.0);
@@ -24572,6 +24577,9 @@ impl CitrusApp {
                     ui.add(egui::Slider::new(&mut self.project.swing, 0.0..=1.0).show_value(false));
                 });
             });
+        if let Some((rect, channel)) = midi_drop_row {
+            self.midi_drop_target(ui, rect, channel);
+        }
         if let Some(channel) = open_sampler_channel {
             self.open_sampler(channel);
         }
@@ -26091,6 +26099,14 @@ impl CitrusApp {
             ));
         }
         ui.allocate_rect(available, Sense::hover());
+        if let Some(channel) = self
+            .project
+            .channels
+            .get(self.selected_channel)
+            .map(|c| c.id)
+        {
+            self.midi_drop_target(ui, grid, channel);
+        }
     }
 
     fn piano_roll_transform_dialog(&mut self, ctx: &egui::Context) {

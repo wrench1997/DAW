@@ -5,6 +5,9 @@ use super::*;
 use eframe::App;
 use egui::accesskit::{Node, Role};
 
+#[path = "midi_drop_ui_tests.rs"]
+mod midi_drop_ui_tests;
+
 struct UiHarness {
     ctx: egui::Context,
     app: Box<CitrusApp>,

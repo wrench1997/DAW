@@ -374,6 +374,39 @@ pub fn import_file_into_active_pattern_with_routing(
         .with_context(|| format!("Unable to import {}", path.display()))
 }
 
+/// Append all SMF voices to the instrument explicitly targeted by a file drop.
+/// Timing stays in beats; file tempo and existing notes/media are never changed.
+pub fn append_to_channel(project: &mut Project, bytes: &[u8], channel: u32) -> Result<usize> {
+    ensure!(bytes.len() <= 16 * 1024 * 1024, "MIDI exceeds 16 MiB");
+    let pattern = project
+        .patterns
+        .get(project.active_pattern)
+        .ok_or_else(|| anyhow!("No active pattern"))?;
+    let midi = parse_smf(bytes)?;
+    ensure!(midi.note_count() > 0, "MIDI contains no notes");
+    ensure!(
+        pattern.notes.len().saturating_add(midi.note_count()) <= 65_536,
+        "MIDI exceeds the 65,536-note pattern limit"
+    );
+    let routing = MidiImportChannelMap::try_new(
+        used_midi_channels(&midi)
+            .into_iter()
+            .map(|ch| (ch, channel)),
+    )?;
+    let notes = routed_project_notes(project, &midi, &routing)?;
+    ensure!(
+        notes.iter().all(|n| n.start.is_finite()
+            && n.length.is_finite()
+            && n.start >= 0.0
+            && n.length > 0.0
+            && n.start + n.length <= 4096.0),
+        "MIDI notes must have positive lengths and fit within 4096 beats"
+    );
+    let count = notes.len();
+    project.active_pattern_mut().notes.extend(notes);
+    Ok(count)
+}
+
 fn routed_project_notes(
     project: &Project,
     midi: &MidiFile,
