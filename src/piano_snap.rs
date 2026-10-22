@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of vertical grid lines emitted for a single visible interval.
 pub const MAX_GRID_LINES: usize = 2_048;
 /// Minimum distance between adjacent emitted lines in viewport pixels.
-pub const MIN_GRID_SPACING_PIXELS: f64 = 4.0;
+pub const MIN_GRID_SPACING_PIXELS: f64 = 8.0;
 
 const UNSNAPPED_COMMAND_STEP: f32 = 1.0 / 64.0;
 
@@ -218,7 +218,7 @@ impl PianoGridLine {
 
 /// Generate only lines in the inclusive visible interval, sorted by beat.
 ///
-/// Rendering is bounded by `MAX_GRID_LINES` and a four-pixel minimum spacing.
+/// Rendering is bounded by `MAX_GRID_LINES` and a eight-pixel minimum spacing.
 /// Dense snap grids are thinned by an integer stride on their original lattice,
 /// retaining beat/bar alignment. Within a beat, the stride divides the selected
 /// subdivision count; beyond a beat it follows 1, 2, 4, then multiples of 4 beats.
@@ -486,11 +486,30 @@ mod tests {
     }
 
     #[test]
+    fn overview_grid_retains_beats_without_dense_minor_lines_or_changing_snap() {
+        let lines = grid_lines(0.0, 8.0, 24.0, PianoSnap::QuarterBeat);
+        for beat in 0..=8 {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.beat == f64::from(beat) && line.beat_line)
+            );
+        }
+        assert!(
+            lines
+                .windows(2)
+                .all(|pair| (pair[1].beat - pair[0].beat) * 24.0 >= 8.0)
+        );
+        // Quarter-beat editing remains available even though its dense display is thinned.
+        assert_eq!(quantize_nearest(0.26, PianoSnap::QuarterBeat), 0.25);
+    }
+
+    #[test]
     fn triplet_thinning_is_an_integer_stride_not_a_straight_replacement() {
         let lines = grid_lines(0.0, 8.0, 30.0, PianoSnap::TwentyFourthBeat);
-        assert_eq!(lines.len(), 49);
+        assert_eq!(lines.len(), 25);
         for (index, line) in lines.iter().enumerate() {
-            assert_eq!(line.beat, index as f64 * 4.0 / 24.0);
+            assert_eq!(line.beat, index as f64 * 8.0 / 24.0);
             assert!(line.snap_target);
         }
         let panned = grid_lines(0.11, 8.11, 30.0, PianoSnap::TwentyFourthBeat);
@@ -518,7 +537,10 @@ mod tests {
                     );
                     for adjacent in lines.windows(2) {
                         assert!(adjacent[0].beat < adjacent[1].beat);
-                        assert!((adjacent[1].beat - adjacent[0].beat) * pixels >= 4.0 - 1.0e-8);
+                        assert!(
+                            (adjacent[1].beat - adjacent[0].beat) * pixels
+                                >= MIN_GRID_SPACING_PIXELS - 1.0e-8
+                        );
                     }
                 }
             }

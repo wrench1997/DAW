@@ -1543,3 +1543,37 @@ fn piano_mouse_large_selection_moves_once_and_focus_cannot_resume() {
         }
     }
 }
+
+#[test]
+fn piano_overview_twelve_pixel_rows_support_real_click_and_resize_with_undo() {
+    let mut ui = short_note_fixture(0.75);
+    assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 24.0);
+    assert_eq!(ui.app.piano_viewport.y.pixels_per_unit(), 12.0);
+    let target = 90_001_u64;
+    let original = project_fingerprint(&ui.app.project);
+    let body_rect = ui
+        .ctx
+        .read_response(Id::new(("piano-note", target)))
+        .unwrap()
+        .rect;
+    assert_eq!(body_rect.height(), 10.0);
+    let edge = grip(&ui, target);
+    assert!(body_rect.right() <= edge.left());
+    click(&mut ui, body_rect.center(), egui::Modifiers::NONE);
+    assert!(ui.app.piano_roll_state.selection_ids.contains(&target));
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+    let before_start = note(&ui, target).start;
+    let edge = grip(&ui, target).center();
+    drag(
+        &mut ui,
+        edge,
+        edge + Vec2::new(24.0, 0.0),
+        egui::Modifiers::NONE,
+        egui::Modifiers::NONE,
+    );
+    assert_eq!(note(&ui, target).start, before_start);
+    assert!(note(&ui, target).length > 0.75);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+}

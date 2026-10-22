@@ -398,6 +398,9 @@ fn creation_piano_fit_notes_reaches_far_data_before_the_silent_phrase_tail() {
         piano_pattern_content_end(ui.app.project.active_pattern()),
         276.0
     );
+    // Establish an editing zoom where the silent phrase tail hides the note.
+    // The new eight-bar overview intentionally shows both at once.
+    ui.app.piano_viewport.x.zoom_at_pixel(0.0, 4.0).unwrap();
     ui.app.piano_viewport.x.set_normalized_scroll(1.0).unwrap();
     ui.settle();
     assert!(!content_span_is_visible(
@@ -406,6 +409,7 @@ fn creation_piano_fit_notes_reaches_far_data_before_the_silent_phrase_tail() {
         259.0
     ));
     let before = project_fingerprint(&ui.app.project);
+    ui.click("TOOLS v");
     ui.click("FIT NOTES");
     ui.settle();
     assert!(content_span_is_visible(
@@ -620,4 +624,48 @@ fn creation_buttons_depress_on_press_and_activate_once_on_release() {
     );
     assert_eq!(node_rect(ui.button("CLICK ON")), rect);
     ui.capture("creation-button-released");
+}
+
+#[test]
+fn piano_initial_overview_compact_wide_and_high_dpi_preserve_user_zoom() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut ui = UiHarness::floating();
+        ui.ctx.set_zoom_factor(scale);
+        ui.size = Vec2::new(1920.0, 1080.0) * scale;
+        piano_clipboard_fixture(&mut ui);
+        assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 24.0);
+        assert_eq!(ui.app.piano_viewport.y.pixels_per_unit(), 12.0);
+        for size in [
+            Vec2::new(580.0, 510.0),
+            Vec2::new(850.0, 620.0),
+            Vec2::new(1120.0, 760.0),
+        ] {
+            ui.arrange_test_windows(
+                &[(
+                    StudioView::PianoRoll,
+                    Rect::from_min_size(Pos2::new(20.0, 20.0), size),
+                )],
+                StudioView::PianoRoll,
+            );
+            let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+            assert!(
+                grid.height() >= 144.0,
+                "scale {scale}, size {size:?}, grid {grid:?}"
+            );
+            assert!(grid.width() >= 400.0);
+            assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 24.0);
+            assert_eq!(ui.app.piano_viewport.y.pixels_per_unit(), 12.0);
+        }
+        ui.app.piano_viewport.x.zoom_at_pixel(0.0, 1.5).unwrap();
+        ui.app.piano_viewport.y.zoom_at_pixel(0.0, 1.25).unwrap();
+        ui.arrange_test_windows(
+            &[(
+                StudioView::PianoRoll,
+                Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(850.0, 620.0)),
+            )],
+            StudioView::PianoRoll,
+        );
+        assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 36.0);
+        assert_eq!(ui.app.piano_viewport.y.pixels_per_unit(), 15.0);
+    }
 }

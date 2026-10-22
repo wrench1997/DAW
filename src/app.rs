@@ -16,6 +16,10 @@ mod whole_song_export_job;
 #[cfg(test)]
 use clip_render_glue::RestorationTestFactory;
 use clip_render_glue::{ClipRenderRestorationBinding, FreshSourceClass, PendingClipRestoration};
+#[cfg(test)]
+mod compact_channel_rack_ui_tests;
+#[cfg(test)]
+mod compact_mixer_ui_tests;
 mod editor_navigation;
 #[cfg(test)]
 mod headless_ui_capture;
@@ -385,14 +389,24 @@ fn playlist_edit_content_end(song_length_beats: f32) -> f64 {
 }
 
 fn default_piano_viewport() -> Viewport2D {
-    let mut pitch = AxisViewport::new(0.0, PIANO_PITCH_COUNT as f64, 576.0, 24.0, 8.0, 96.0)
+    // Start with a musical overview rather than oversized blocks: about eight
+    // bars and 28 semitones in the standard floating score. These are defaults
+    // only; resizing and later navigation preserve the user's chosen zoom.
+    let mut pitch = AxisViewport::new(0.0, PIANO_PITCH_COUNT as f64, 336.0, 12.0, 8.0, 96.0)
         .expect("piano pitch viewport constants are valid");
     pitch
-        .reveal(49.0, 73.0, 0.0)
+        .reveal(53.0, 81.0, 0.0)
         .expect("piano initial pitch range is finite");
     Viewport2D::new(
-        AxisViewport::new(0.0, f64::from(LOOP_LENGTH), 960.0, 60.0, 1.0, 512.0)
-            .expect("piano time viewport constants are valid"),
+        AxisViewport::new(
+            0.0,
+            f64::from(LOOP_LENGTH).max(32.0),
+            768.0,
+            24.0,
+            1.0,
+            512.0,
+        )
+        .expect("piano time viewport constants are valid"),
         pitch,
     )
 }
@@ -491,9 +505,9 @@ fn piano_pitch_at_pixel(axis: AxisViewport, pixel: f64) -> Option<u8> {
 }
 
 fn piano_pattern_content_end(pattern: &Pattern) -> f64 {
-    // Keep an editable bar after the effective phrase, including its padding.
-    // The visible presets are zoom shortcuts, not a limit on score duration.
-    pattern.piano_period_beats(f64::from(LOOP_LENGTH)) + 4.0
+    // Keep an editable bar after the effective phrase and at least eight visual
+    // bars for composing. This viewport-only floor never extends playback.
+    (pattern.piano_period_beats(f64::from(LOOP_LENGTH)) + 4.0).max(32.0)
 }
 
 fn content_span_is_visible(axis: AxisViewport, start: f64, end: f64) -> bool {
@@ -5654,7 +5668,7 @@ impl CitrusApp {
                 show_inspector: workspace::Workspace::load(cc.storage).inspector_visible,
                 show_settings: false,
                 settings_page: SettingsPage::Audio,
-                browser_tab: BrowserTab::Sounds,
+                browser_tab: BrowserTab::Project,
                 browser_search: String::new(),
                 sample_browser: crate::sample_browser::SampleBrowser::default(),
                 show_plugins: false,
@@ -17431,14 +17445,14 @@ impl CitrusApp {
     fn toolbar(&mut self, root: &mut egui::Ui) {
         // Keep every transport and navigation action visible at the supported minimum size.
         // A second explicit row is preferable to right-aligned controls painting over siblings.
-        // PAT/SONG retain native 25-point hit heights: 51 points plus outer margins.
+        // PAT/SONG share a compact horizontal group with 34-point hit heights.
         // Reserve the complete second navigation row; Panel clips at its exact bounds.
-        let compact = root.available_width() < 1180.0;
+        let compact = root.available_width() < 1260.0;
         egui::Panel::top("toolbar")
-            .exact_size(if compact { 98.0 } else { 60.0 })
+            .exact_size(if compact { 88.0 } else { 56.0 })
             .frame(
                 egui::Frame::NONE
-                    .fill(theme::PANEL)
+                    .fill(theme::CHROME)
                     .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show(root, |ui| {
@@ -17853,7 +17867,7 @@ impl CitrusApp {
         let maximum_width = (root.available_width() - MIN_EDITOR_PANEL_WIDTH - inspector_reserve)
             .clamp(168.0, 320.0);
         egui::Panel::left("browser")
-            .default_size(176.0)
+            .default_size(224.0)
             .size_range(168.0..=maximum_width)
             .resizable(true)
             .frame(
@@ -17920,7 +17934,7 @@ impl CitrusApp {
                 ui.add_space(6.0);
 
                 let footer_height = if self.browser_tab == BrowserTab::Sounds {
-                    145.0
+                    100.0
                 } else {
                     64.0
                 };
@@ -18688,52 +18702,52 @@ impl CitrusApp {
         ui.label(
             RichText::new(&self.project.name)
                 .strong()
-                .size(12.0)
                 .color(theme::ORANGE),
         );
-        ui.label(
-            RichText::new(format!(
-                "{} channels  ·  {} clips  ·  {} notes  ·  {} audio files",
-                self.project.channels.len(),
-                self.project.clips.len(),
-                self.project.active_pattern().notes.len(),
-                self.project.audio_assets.len()
-            ))
-            .size(8.5)
-            .color(theme::MUTED),
-        );
-        ui.add_space(7.0);
         let query = self.browser_search.to_lowercase();
-        for channel in &self.project.channels {
-            if query.is_empty() || channel.name.to_lowercase().contains(&query) {
-                library_row(ui, &channel.name, "CHANNEL", theme::color(channel.color));
-            }
-        }
-        ui.separator();
-        for asset in &self.project.audio_assets {
-            if query.is_empty() || asset.name.to_lowercase().contains(&query) {
-                let duration = asset.duration_seconds();
-                library_row(
-                    ui,
-                    &asset.name,
-                    &format!("WAV {:.1}s", duration),
-                    theme::AMBER,
-                );
-            }
-        }
-        if !self.project.audio_assets.is_empty() {
-            ui.separator();
-        }
-        for clip in &self.project.clips {
-            if query.is_empty() || clip.name.to_lowercase().contains(&query) {
-                let tag = match clip.kind {
-                    ClipKind::Pattern => "PATTERN",
-                    ClipKind::Audio => "AUDIO",
-                    ClipKind::Automation => "AUTO",
-                };
-                library_row(ui, &clip.name, tag, theme::color(clip.color));
-            }
-        }
+        egui::CollapsingHeader::new("Channels")
+            .default_open(true)
+            .show(ui, |ui| {
+                for channel in &self.project.channels {
+                    if query.is_empty() || channel.name.to_lowercase().contains(&query) {
+                        library_row(ui, &channel.name, "", theme::color(channel.color));
+                    }
+                }
+            });
+        egui::CollapsingHeader::new("Patterns")
+            .default_open(true)
+            .show(ui, |ui| {
+                for pattern in &self.project.patterns {
+                    if query.is_empty() || pattern.name.to_lowercase().contains(&query) {
+                        library_row(ui, &pattern.name, "PAT", theme::GREEN);
+                    }
+                }
+            });
+        egui::CollapsingHeader::new("Samples")
+            .default_open(true)
+            .show(ui, |ui| {
+                if self.project.audio_assets.is_empty() {
+                    ui.label(
+                        RichText::new("No project samples")
+                            .small()
+                            .color(theme::MUTED),
+                    );
+                }
+                for asset in &self.project.audio_assets {
+                    if query.is_empty() || asset.name.to_lowercase().contains(&query) {
+                        library_row(ui, &asset.name, "WAV", theme::AMBER);
+                    }
+                }
+            });
+        egui::CollapsingHeader::new("Arrangement")
+            .default_open(true)
+            .show(ui, |ui| {
+                for clip in &self.project.clips {
+                    if query.is_empty() || clip.name.to_lowercase().contains(&query) {
+                        library_row(ui, &clip.name, "", theme::color(clip.color));
+                    }
+                }
+            });
     }
 
     fn inspector(&mut self, root: &mut egui::Ui) {
@@ -22145,14 +22159,10 @@ impl CitrusApp {
         {
             return;
         }
-        let mut piano_transform_request = None;
-        let mut piano_group_request = None;
         let mut playlist_group_request = None;
         let mut playlist_crossfade_request = false;
-        let mut piano_quick_legato_request = false;
-        let mut piano_immediate_request = None;
         egui::Frame::NONE
-            .fill(theme::PANEL_ALT)
+            .fill(theme::CHROME)
             .inner_margin(egui::Margin::symmetric(4, 1))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -22163,106 +22173,7 @@ impl CitrusApp {
                     if matches!(view, StudioView::Playlist | StudioView::PianoRoll) {
                     ui.separator();
                     if view == StudioView::PianoRoll {
-                        for (mode, icon, hint) in [
-                            (PianoRollTool::Draw, StudioIcon::Pencil, "Draw — P"),
-                            (PianoRollTool::Paint, StudioIcon::Paint, "Paint — B"),
-                            (PianoRollTool::Delete, StudioIcon::Eraser, "Delete — D"),
-                            (PianoRollTool::Mute, StudioIcon::Mute, "Mute — T"),
-                            (PianoRollTool::Slice, StudioIcon::Slice, "Slice — C"),
-                            (PianoRollTool::Select, StudioIcon::Pointer, "Select — E"),
-                            (
-                                PianoRollTool::Stamp,
-                                StudioIcon::Stamp,
-                                "Chord stamp — place the selected chord with one click",
-                            ),
-                        ] {
-                            if icons::icon_button(
-                                ui,
-                                icon,
-                                self.piano_roll_state.tool == mode,
-                                24.0,
-                            )
-                            .on_hover_text(hint)
-                            .clicked()
-                            {
-                                self.piano_roll_state.tool = mode;
-                            }
-                        }
-                        ui.label(
-                            RichText::new(self.piano_roll_state.tool.label())
-                                .monospace()
-                                .size(8.0)
-                                .color(theme::MUTED),
-                        );
-                        if icons::icon_button(
-                            ui,
-                            StudioIcon::Group,
-                            self.piano_roll_state.grouping_enabled,
-                            24.0,
-                        )
-                        .on_hover_text(if self.piano_roll_state.grouping_enabled {
-                            "Note grouping enabled — click to suspend group behavior"
-                        } else {
-                            "Note grouping suspended — persisted groups are preserved"
-                        })
-                        .clicked()
-                        {
-                            self.piano_roll_state.grouping_enabled =
-                                !self.piano_roll_state.grouping_enabled;
-                        }
-                        ui.menu_button(
-                            RichText::new("TOOLS v").size(9.0).color(theme::TEXT),
-                            |ui| {
-                                ui.set_min_width(190.0);
-                                if ui.studio_button("Quick legato       Ctrl+L").clicked() {
-                                    piano_quick_legato_request = true;
-                                    ui.close();
-                                }
-                                ui.separator();
-                                for (label, edit) in [
-                                    ("Duplicate right     Ctrl/Cmd+B", PianoKeyboardEdit::RepeatRight),
-                                    ("Discard lengths    Shift+D", PianoKeyboardEdit::DiscardLengths),
-                                    (if cfg!(target_os = "macos") { "Quick quantize     Opt+Cmd+Q" } else { "Quick quantize     Ctrl+Q" }, PianoKeyboardEdit::QuickQuantize { starts_only: false }),
-                                    ("Quantize starts     Shift+Q", PianoKeyboardEdit::QuickQuantize { starts_only: true }),
-                                ] {
-                                    if ui.studio_button(label).clicked() {
-                                        piano_immediate_request = Some(ShortcutAction::PianoEdit(edit));
-                                        ui.close();
-                                    }
-                                }
-                                ui.label(RichText::new("Shift+arrows: snap step / semitone").size(10.0).color(theme::MUTED));
-                                ui.label(RichText::new("Ctrl/Cmd+Up/Down: octave").size(10.0).color(theme::MUTED));
-                                ui.label(RichText::new("Ctrl/Cmd+D: deselect · Alt+V: ghosts").size(10.0).color(theme::MUTED));
-                                ui.separator();
-                                for kind in PianoRollTransformKind::ALL {
-                                    if ui
-                                        .studio_button(format!(
-                                            "{:<12}  {}",
-                                            kind.label(),
-                                            kind.shortcut()
-                                        ))
-                                        .clicked()
-                                    {
-                                        piano_transform_request = Some(kind);
-                                        ui.close();
-                                    }
-                                }
-                                ui.separator();
-                                if ui.studio_button("Group selected       Shift+G").clicked() {
-                                    piano_group_request = Some(true);
-                                    ui.close();
-                                }
-                                if ui.studio_button("Ungroup selected     Alt+G").clicked() {
-                                    piano_group_request = Some(false);
-                                    ui.close();
-                                }
-                                ui.separator();
-                                ui.checkbox(
-                                    &mut self.piano_roll_state.grouping_enabled,
-                                    "Enable note grouping",
-                                );
-                            },
-                        );
+                        self.piano_toolbar_tools(ui);
                     } else {
                         for (mode, icon, hint) in [
                             (ToolMode::Draw, StudioIcon::Pencil, "Draw — P"),
@@ -22390,22 +22301,6 @@ impl CitrusApp {
                     }
                 });
             });
-        if let Some(kind) = piano_transform_request {
-            self.begin_piano_roll_transform(kind);
-        }
-        if piano_quick_legato_request {
-            self.piano_menu_action(ui.ctx(), ShortcutAction::QuickLegato);
-        }
-        if let Some(action) = piano_immediate_request {
-            self.piano_menu_action(ui.ctx(), action);
-        }
-        if let Some(group) = piano_group_request {
-            if group {
-                self.group_piano_roll_selection();
-            } else {
-                self.ungroup_piano_roll_selection();
-            }
-        }
         if let Some(group) = playlist_group_request {
             if group {
                 self.group_playlist_selection();
@@ -24382,6 +24277,15 @@ impl CitrusApp {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                let compact = ui.available_width() < 600.0;
+                if compact {
+                    ui.spacing_mut().button_padding = Vec2::new(2.0, 2.0);
+                    ui.spacing_mut().interact_size.x = 16.0;
+                    ui.spacing_mut().slider_width = 88.0;
+                }
+                let control_size = if compact { 16.0 } else { 24.0 };
+                let step_gap = if compact { 1.0 } else { 2.0 };
+                let beat_gap = if compact { 3.0 } else { 4.0 };
                 let beat_header = ui
                     .allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover())
                     .0;
@@ -24394,7 +24298,7 @@ impl CitrusApp {
                 for (channel_index, channel) in channels.iter_mut().enumerate() {
                     let steps = &mut pattern_steps[channel_index];
                     let row_fill = if channel_index == self.selected_channel {
-                        Color32::from_rgb(33, 39, 41)
+                        theme::ORANGE_DIM
                     } else if channel_index % 2 == 0 {
                         theme::PANEL_ALT
                     } else {
@@ -24416,7 +24320,7 @@ impl CitrusApp {
                                 let selected = self.selected_channel == channel_index;
                                 let channel_button = ui
                                     .add_sized(
-                                        [104.0, 24.0],
+                                        [if compact { 64.0 } else { 104.0 }, 24.0],
                                         theme::Button::new(RichText::new(&channel.name).size(10.0))
                                             .selected(selected)
                                             .truncate(),
@@ -24448,7 +24352,7 @@ impl CitrusApp {
                                 }
                                 let mute = ui
                                     .add_sized(
-                                        [24.0, 24.0],
+                                        [control_size, 24.0],
                                         theme::Button::new("M").selected(channel.muted),
                                     )
                                     .on_hover_text("Mute this channel");
@@ -24465,7 +24369,7 @@ impl CitrusApp {
                                 }
                                 let solo = ui
                                     .add_sized(
-                                        [24.0, 24.0],
+                                        [control_size, 24.0],
                                         theme::Button::new("S").selected(channel.solo),
                                     )
                                     .on_hover_text("Solo this channel");
@@ -24484,10 +24388,17 @@ impl CitrusApp {
                                     ui,
                                     &mut channel.pan,
                                     -1.0..=1.0,
-                                    24.0,
+                                    control_size,
                                     theme::color(channel.color),
                                 )
                                 .on_hover_text("Pan");
+                                pan_response.widget_info(|| {
+                                    egui::WidgetInfo::slider(
+                                        ui.is_enabled(),
+                                        f64::from(channel.pan),
+                                        format!("Pan {}", channel.name),
+                                    )
+                                });
                                 native_automation::control_menu(
                                     &pan_response,
                                     AutomationTarget::ChannelPan {
@@ -24495,9 +24406,21 @@ impl CitrusApp {
                                     },
                                     &mut automation_request,
                                 );
-                                let volume_response =
-                                    knob(ui, &mut channel.volume, 0.0..=1.0, 24.0, theme::ORANGE)
-                                        .on_hover_text("Volume; right-click for automation");
+                                let volume_response = knob(
+                                    ui,
+                                    &mut channel.volume,
+                                    0.0..=1.0,
+                                    control_size,
+                                    theme::ORANGE,
+                                )
+                                .on_hover_text("Volume; right-click for automation");
+                                volume_response.widget_info(|| {
+                                    egui::WidgetInfo::slider(
+                                        ui.is_enabled(),
+                                        f64::from(channel.volume),
+                                        format!("Volume {}", channel.name),
+                                    )
+                                });
                                 native_automation::control_menu(
                                     &volume_response,
                                     AutomationTarget::ChannelVolume {
@@ -24510,15 +24433,22 @@ impl CitrusApp {
                                     .position(|track_id| *track_id == Some(channel.mixer_track))
                                     .unwrap_or(0);
                                 let destination_response = ui.add_sized(
-                                    [43.0, 24.0],
+                                    [if compact { 24.0 } else { 43.0 }, 24.0],
                                     egui::DragValue::new(&mut mixer_runtime_slot)
                                         .range(
                                             0..=mixer_track_ids_by_runtime_slot
                                                 .len()
                                                 .saturating_sub(1),
                                         )
-                                        .prefix("FX "),
+                                        .prefix(if compact { "" } else { "FX " }),
                                 );
+                                destination_response.widget_info(|| {
+                                    egui::WidgetInfo::slider(
+                                        ui.is_enabled(),
+                                        mixer_runtime_slot as f64,
+                                        format!("Mixer destination {}", channel.name),
+                                    )
+                                });
                                 if destination_response.changed()
                                     && let Some(Some(mixer_track_id)) =
                                         mixer_track_ids_by_runtime_slot.get(mixer_runtime_slot)
@@ -24526,15 +24456,18 @@ impl CitrusApp {
                                     channel.mixer_track = *mixer_track_id;
                                 }
                                 destination_response.on_hover_text("Mixer insert destination");
-                                ui.add_space(5.0);
-                                // Budget the steps after the controls have their real bounds.
-                                // A long name is truncated above; it cannot steal a beat's width.
-                                // The scroll area supplies the minimum when the window is narrow.
-                                let step_width =
-                                    ((ui.available_width() - 42.0) / 16.0).clamp(24.0, 40.0);
+                                ui.add_space(if compact { 2.0 } else { 5.0 });
+                                // Fit every step into the width left by the actual controls.
+                                // Compact spacing preserves all four beats in a 400px rack.
+                                let step_count = steps.len().max(1);
+                                let gap_width = (step_count - 1) as f32 * step_gap
+                                    + ((step_count - 1) / 4) as f32 * beat_gap;
+                                let step_width = ((ui.available_width() - gap_width)
+                                    / step_count as f32)
+                                    .clamp(4.0, 40.0);
                                 let step_area = ui
                                     .allocate_exact_size(
-                                        Vec2::new(16.0 * step_width + 42.0, 24.0),
+                                        Vec2::new(step_count as f32 * step_width + gap_width, 24.0),
                                         Sense::hover(),
                                     )
                                     .0;
@@ -24543,8 +24476,8 @@ impl CitrusApp {
                                     let rect = Rect::from_min_size(
                                         step_area.min
                                             + Vec2::new(
-                                                step as f32 * (step_width + 2.0)
-                                                    + (step / 4) as f32 * 4.0,
+                                                step as f32 * (step_width + step_gap)
+                                                    + (step / 4) as f32 * beat_gap,
                                                 0.0,
                                             ),
                                         Vec2::new(step_width, 24.0),
@@ -24555,14 +24488,16 @@ impl CitrusApp {
                                         Sense::click(),
                                     );
                                     if channel_index == 0 && step % 4 == 0 {
-                                        let center = rect.left()
-                                            + (step_width * 4.0
-                                                + ui.spacing().item_spacing.x * 3.0)
-                                                * 0.5;
+                                        let center =
+                                            rect.left() + (step_width * 4.0 + step_gap * 3.0) * 0.5;
                                         ui.painter().text(
                                             Pos2::new(center, beat_header.center().y),
                                             Align2::CENTER_CENTER,
-                                            format!("BEAT {}", step / 4 + 1),
+                                            if compact {
+                                                format!("{}", step / 4 + 1)
+                                            } else {
+                                                format!("BEAT {}", step / 4 + 1)
+                                            },
                                             FontId::proportional(8.0),
                                             theme::MUTED,
                                         );
@@ -24798,6 +24733,152 @@ impl CitrusApp {
         )
     }
 
+    fn piano_toolbar_tools(&mut self, ui: &mut egui::Ui) {
+        let mut piano_transform_request = None;
+        let mut piano_group_request = None;
+        let mut piano_quick_legato_request = false;
+        let mut piano_immediate_request = None;
+
+        for (mode, icon, hint) in [
+            (PianoRollTool::Draw, StudioIcon::Pencil, "Draw — P"),
+            (PianoRollTool::Paint, StudioIcon::Paint, "Paint — B"),
+            (PianoRollTool::Delete, StudioIcon::Eraser, "Delete — D"),
+            (PianoRollTool::Mute, StudioIcon::Mute, "Mute — T"),
+            (PianoRollTool::Slice, StudioIcon::Slice, "Slice — C"),
+            (PianoRollTool::Select, StudioIcon::Pointer, "Select — E"),
+            (
+                PianoRollTool::Stamp,
+                StudioIcon::Stamp,
+                "Chord stamp — place the selected chord with one click",
+            ),
+        ] {
+            if icons::icon_button(ui, icon, self.piano_roll_state.tool == mode, 24.0)
+                .on_hover_text(format!("{} tool\n{hint}", mode.label()))
+                .clicked()
+            {
+                self.piano_roll_state.tool = mode;
+            }
+        }
+        if icons::icon_button(
+            ui,
+            StudioIcon::Group,
+            self.piano_roll_state.grouping_enabled,
+            24.0,
+        )
+        .on_hover_text(if self.piano_roll_state.grouping_enabled {
+            "Note grouping enabled — click to suspend group behavior"
+        } else {
+            "Note grouping suspended — persisted groups are preserved"
+        })
+        .clicked()
+        {
+            self.piano_roll_state.grouping_enabled = !self.piano_roll_state.grouping_enabled;
+        }
+        ui.menu_button(
+            RichText::new("TOOLS v").size(9.0).color(theme::TEXT),
+            |ui| {
+                ui.set_min_width(190.0);
+                if ui
+                    .studio_button("FIT NOTES")
+                    .on_hover_text("Fit the active Channel's notes in the Piano grid")
+                    .clicked()
+                {
+                    self.fit_active_piano_notes();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.studio_button("Quick legato       Ctrl+L").clicked() {
+                    piano_quick_legato_request = true;
+                    ui.close();
+                }
+                ui.separator();
+                for (label, edit) in [
+                    (
+                        "Duplicate right     Ctrl/Cmd+B",
+                        PianoKeyboardEdit::RepeatRight,
+                    ),
+                    (
+                        "Discard lengths    Shift+D",
+                        PianoKeyboardEdit::DiscardLengths,
+                    ),
+                    (
+                        if cfg!(target_os = "macos") {
+                            "Quick quantize     Opt+Cmd+Q"
+                        } else {
+                            "Quick quantize     Ctrl+Q"
+                        },
+                        PianoKeyboardEdit::QuickQuantize { starts_only: false },
+                    ),
+                    (
+                        "Quantize starts     Shift+Q",
+                        PianoKeyboardEdit::QuickQuantize { starts_only: true },
+                    ),
+                ] {
+                    if ui.studio_button(label).clicked() {
+                        piano_immediate_request = Some(ShortcutAction::PianoEdit(edit));
+                        ui.close();
+                    }
+                }
+                ui.label(
+                    RichText::new("Shift+arrows: snap step / semitone")
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
+                ui.label(
+                    RichText::new("Ctrl/Cmd+Up/Down: octave")
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
+                ui.label(
+                    RichText::new("Ctrl/Cmd+D: deselect · Alt+V: ghosts")
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
+                ui.separator();
+                for kind in PianoRollTransformKind::ALL {
+                    if ui
+                        .studio_button(format!("{:<12}  {}", kind.label(), kind.shortcut()))
+                        .clicked()
+                    {
+                        piano_transform_request = Some(kind);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.studio_button("Group selected       Shift+G").clicked() {
+                    piano_group_request = Some(true);
+                    ui.close();
+                }
+                if ui.studio_button("Ungroup selected     Alt+G").clicked() {
+                    piano_group_request = Some(false);
+                    ui.close();
+                }
+                ui.separator();
+                ui.checkbox(
+                    &mut self.piano_roll_state.grouping_enabled,
+                    "Enable note grouping",
+                );
+            },
+        );
+
+        if let Some(kind) = piano_transform_request {
+            self.begin_piano_roll_transform(kind);
+        }
+        if piano_quick_legato_request {
+            self.piano_menu_action(ui.ctx(), ShortcutAction::QuickLegato);
+        }
+        if let Some(action) = piano_immediate_request {
+            self.piano_menu_action(ui.ctx(), action);
+        }
+        if let Some(group) = piano_group_request {
+            if group {
+                self.group_piano_roll_selection();
+            } else {
+                self.ungroup_piano_roll_selection();
+            }
+        }
+    }
+
     fn piano_roll(&mut self, ui: &mut egui::Ui) {
         self.sync_piano_range_owner();
         // A whole-project import/save/native snapshot must not race a note preview.
@@ -24835,7 +24916,16 @@ impl CitrusApp {
             (pattern_playback_length_beats(&self.project) / 4.0).ceil() as usize
         );
         let piano_preferences_before = self.piano_roll_state.preferences();
-        self.workspace_header(ui, StudioView::PianoRoll, "PIANO ROLL", &piano_subtitle);
+        if self.workspace.maximized {
+            ui.horizontal(|ui| {
+                self.maximized_editor_title(
+                    ui,
+                    StudioView::PianoRoll,
+                    "PIANO ROLL",
+                    &piano_subtitle,
+                );
+            });
+        }
         let selected_note_count = self.piano_roll_state.selection_ids.len();
         let unassigned_count = self
             .project
@@ -24863,7 +24953,7 @@ impl CitrusApp {
             .selected_channel
             .min(channel_choices.len().saturating_sub(1));
         let mut target_channel_changed = false;
-        let compact_piano = ui.available_width() < 640.0;
+
         let mut assignment_ui = |ui: &mut egui::Ui| {
             ui.add_enabled_ui(selected_note_count != 0, |ui| {
                 egui::ComboBox::from_id_salt("piano-note-channel-assignment")
@@ -24889,10 +24979,27 @@ impl CitrusApp {
                     });
             });
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("TARGET").size(9.0).color(theme::MUTED));
+        // One coherent action strip; native wrapping creates only a second row on
+        // the minimum editor. Long names are bounded, never used as layout widths.
+        egui::Frame::NONE.fill(theme::CHROME)
+            .inner_margin(egui::Margin::symmetric(4, 3))
+            .show(ui, |ui| { ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(3.0, 3.0);
+            self.piano_toolbar_tools(ui);
+            ui.separator();
+            ui.allocate_ui_with_layout(Vec2::new(80.0, 24.0), Layout::left_to_right(Align::Center), |ui| {
+            egui::ComboBox::from_id_salt("snap-PIANO ROLL")
+                .width(80.0).truncate()
+                .selected_text(self.piano_roll_state.local_snap.label())
+                .show_ui(ui, |ui| {
+                    for snap in PianoSnap::ALL {
+                        ui.selectable_value(&mut self.piano_roll_state.local_snap, snap, snap.label());
+                    }
+                }).response.on_hover_text("Piano-local time snap. Playlist snap is independent. Off preserves raw pointer editing.");
+            });
+            ui.allocate_ui_with_layout(Vec2::new(96.0, 24.0), Layout::left_to_right(Align::Center), |ui| {
             egui::ComboBox::from_id_salt("piano-target-channel")
-                .width(160.0)
+                .width(96.0).truncate()
                 .selected_text(
                     channel_choices
                         .get(target_channel_index)
@@ -24911,22 +25018,10 @@ impl CitrusApp {
                             .changed();
                     }
                 });
-            ui.separator();
-            ui.label(
-                RichText::new(format!(
-                    "{selected_note_count} selected / {unassigned_count} unassigned"
-                ))
-                .size(9.0)
-                .color(if unassigned_count == 0 {
-                    theme::MUTED
-                } else {
-                    theme::AMBER
-                }),
-            );
-            ui.separator();
+            });
             self.piano_ghost_controls(ui);
             ui.separator();
-            ui.menu_button("NOTE EDIT v", |ui| {
+            ui.menu_button(RichText::new("NOTE EDIT v").size(9.0), |ui| {
                 ui.set_width(440.0);
                 self.piano_clipboard_toolbar(ui, true);
                 ui.separator();
@@ -24934,7 +25029,8 @@ impl CitrusApp {
                 ui.separator();
                 ui.label("Selected note Channel");
                 assignment_ui(ui);
-            });
+                ui.separator();
+                ui.label(RichText::new(format!("{selected_note_count} selected · {unassigned_count} unassigned")).small());
             let scale_label = if self.piano_roll_state.snap_to_scale {
                 format!("SCALE / CHORD v · {} {} LOCK{}", pitch_class_label(self.piano_roll_state.scale_root), self.piano_roll_state.scale.label(), if self.piano_roll_state.tool == PianoRollTool::Stamp { format!(" · {}", self.piano_roll_state.chord_stamp.label()) } else { String::new() })
             } else if self.piano_roll_state.tool == PianoRollTool::Stamp {
@@ -24944,18 +25040,12 @@ impl CitrusApp {
             };
             ui.menu_button(scale_label, |ui| { ui.set_width(540.0); self.piano_scale_tools(ui); });
             ui.menu_button("VIEW v", |ui| { self.piano_view_controls(ui); });
-            if ui.small_button("FIT NOTES").on_hover_text("Fit the active Channel's notes in the Piano grid").clicked() {
-                self.fit_active_piano_notes();
-            }
             let range = self.piano_roll_state.repeat_range.map_or_else(|| "Range none".to_owned(), |r| format!("Range {:.2}–{:.2}", r.start,r.end));
             let paste = self.piano_paste_anchor().map_or_else(|_| "Paste invalid".to_owned(),|beat|format!("Paste {beat:.2}"));
             let range_tooltip = format!("{range} · {paste}\nEdit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
-            ui.allocate_ui_with_layout(Vec2::new(136.0, 18.0), Layout::left_to_right(Align::Center), |ui| {
-                ui.set_min_width(136.0);
-                ui.add(egui::Label::new(RichText::new(if compact_piano { range } else { format!("{range} · {paste}") }).size(9.0).color(theme::ORANGE)).truncate())
-                .on_hover_text(range_tooltip);
+            ui.label(RichText::new(format!("{range} · {paste}")).small().color(theme::ORANGE)).on_hover_text(range_tooltip);
             });
-        });
+        }); });
         if target_channel_changed {
             self.selected_channel = target_channel_index;
             self.piano_roll_state.selection_ids.clear();
@@ -25053,7 +25143,12 @@ impl CitrusApp {
         let note_grid_painter = painter.with_clip_rect(grid);
         let piano_body_painter = painter.with_clip_rect(piano_surface);
         let velocity_painter = painter.with_clip_rect(velocity_rect);
-        painter.rect_filled(available, 0.0, theme::BG);
+        painter.rect_filled(available, 0.0, Color32::from_rgb(20, 27, 33));
+        painter.rect_filled(
+            Rect::from_min_max(available.left_top(), grid.right_top()),
+            0.0,
+            Color32::from_rgb(24, 32, 39),
+        );
 
         let mut audition_notes = Vec::new();
         let first_pitch_row = (pitch_start.floor() as usize).min(PIANO_PITCH_COUNT);
@@ -25070,22 +25165,22 @@ impl CitrusApp {
             let scale_root = note.rem_euclid(12) == usize::from(self.piano_roll_state.scale_root);
             let row_color = if self.piano_roll_state.scale_highlighting {
                 if scale_root {
-                    Color32::from_rgb(44, 40, 34)
+                    Color32::from_rgb(33, 43, 47)
                 } else if in_scale {
                     if black {
-                        Color32::from_rgb(27, 31, 36)
+                        Color32::from_rgb(25, 33, 39)
                     } else {
-                        Color32::from_rgb(34, 39, 45)
+                        Color32::from_rgb(30, 39, 46)
                     }
                 } else if black {
-                    Color32::from_rgb(23, 27, 32)
+                    Color32::from_rgb(21, 28, 34)
                 } else {
-                    Color32::from_rgb(29, 33, 39)
+                    Color32::from_rgb(26, 34, 41)
                 }
             } else if black {
-                Color32::from_rgb(25, 29, 34)
+                Color32::from_rgb(23, 30, 36)
             } else {
-                Color32::from_rgb(33, 38, 44)
+                Color32::from_rgb(29, 37, 44)
             };
             let row_rect = Rect::from_min_size(
                 Pos2::new(available.left(), y),
@@ -25139,13 +25234,13 @@ impl CitrusApp {
                 Stroke::new(
                     if line.bar { 1.1 } else { 0.6 },
                     if line.bar {
-                        Color32::from_rgb(68, 77, 88)
+                        Color32::from_rgb(59, 73, 85)
                     } else if !line.snap_target {
                         theme::GRID.gamma_multiply(0.45)
                     } else if line.beat_line {
                         theme::GRID
                     } else {
-                        Color32::from_rgb(39, 45, 52)
+                        Color32::from_rgb(29, 38, 46)
                     },
                 ),
             );
@@ -25179,6 +25274,41 @@ impl CitrusApp {
             FontId::proportional(8.0),
             theme::MUTED,
         );
+
+        // Align the expression lane with the score and give its range quiet
+        // reference marks. These are paint-only: the existing handle hitboxes stay.
+        for fraction in [0.0_f32, 0.5, 1.0] {
+            let y = egui::lerp(
+                velocity_rect.bottom() - 3.0..=velocity_rect.top() + 8.0,
+                fraction,
+            );
+            velocity_painter.line_segment(
+                [Pos2::new(grid.left(), y), Pos2::new(grid.right(), y)],
+                Stroke::new(0.6, Color32::from_rgb(37, 48, 57)),
+            );
+        }
+        painter.line_segment(
+            [
+                Pos2::new(available.left(), grid.bottom()),
+                grid.right_bottom(),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(63, 76, 86)),
+        );
+        for (fraction, label) in [(0.0_f32, "0"), (1.0, "127")] {
+            painter.text(
+                Pos2::new(
+                    grid.left() - 7.0,
+                    egui::lerp(
+                        velocity_rect.bottom() - 8.0..=velocity_rect.top() + 27.0,
+                        fraction,
+                    ),
+                ),
+                Align2::RIGHT_CENTER,
+                label,
+                FontId::monospace(8.0),
+                theme::MUTED,
+            );
+        }
 
         let grouping_enabled = self.piano_roll_state.grouping_enabled;
         let mut delete_note_ids = None;
@@ -25244,14 +25374,7 @@ impl CitrusApp {
                 piano_snap,
                 bypass_snap,
             );
-            let preview_color = selected_channel_route
-                .and_then(|(channel_id, _)| {
-                    channel_choices
-                        .iter()
-                        .find(|(candidate, ..)| *candidate == channel_id)
-                        .map(|(_, _, _, color)| theme::color(*color))
-                })
-                .unwrap_or(theme::ORANGE);
+            let preview_color = piano_ghosts::NOTE_FACE;
             for pitch in chord_stamp_pitches(
                 root_note,
                 self.piano_roll_state.chord_stamp,
@@ -25316,9 +25439,7 @@ impl CitrusApp {
             if !editable {
                 continue;
             }
-            let note_color = note_route
-                .map(|(_, _, _, color)| theme::color(*color))
-                .unwrap_or(theme::AMBER);
+            let note_color = piano_ghosts::NOTE_FACE;
             let pitch_row = piano_pitch_row(note.note);
             if !content_span_is_visible(self.piano_viewport.y, pitch_row, pitch_row + 1.0) {
                 continue;
@@ -25348,23 +25469,49 @@ impl CitrusApp {
                     "Apply the selected tool to this note"
                 });
             let selected = self.piano_roll_state.selection_ids.contains(&note.id);
-            note_grid_painter.rect_filled(
-                rect,
-                2.0,
-                note_color.gamma_multiply(if note.muted {
-                    0.2
-                } else if selected {
-                    0.95
-                } else {
-                    0.82
-                }),
-            );
+            let face = if note.muted {
+                Color32::from_rgb(60, 73, 73)
+            } else if selected {
+                Color32::from_rgb(104, 213, 187)
+            } else {
+                note_color
+            };
+            note_grid_painter.rect_filled(rect, 1.0, face);
             note_grid_painter.rect_stroke(
                 rect,
-                2.0,
-                Stroke::new(1.0, if selected { Color32::WHITE } else { note_color }),
+                1.0,
+                Stroke::new(
+                    1.0,
+                    if selected {
+                        piano_ghosts::ACTIVITY
+                    } else {
+                        piano_ghosts::NOTE_EDGE
+                    },
+                ),
                 StrokeKind::Inside,
             );
+            // A compact top edge gives notes a clear face without glossy gradients.
+            if rect.width() > 5.0 && rect.height() > 3.0 {
+                note_grid_painter.line_segment(
+                    [
+                        rect.left_top() + Vec2::new(1.0, 1.0),
+                        rect.right_top() + Vec2::new(-1.0, 1.0),
+                    ],
+                    Stroke::new(
+                        0.7,
+                        piano_ghosts::NOTE_EDGE.gamma_multiply(if note.muted { 0.3 } else { 0.85 }),
+                    ),
+                );
+            }
+            if note.muted {
+                note_grid_painter.line_segment(
+                    [
+                        rect.left_center() + Vec2::new(2.0, 0.0),
+                        rect.right_center() - Vec2::new(2.0, 0.0),
+                    ],
+                    Stroke::new(1.0, Color32::from_rgb(146, 157, 157)),
+                );
+            }
             if note.group_id.is_some() && rect.width() >= 11.0 {
                 let left = Pos2::new(rect.left() + 3.5, rect.center().y);
                 let right = Pos2::new(rect.left() + 8.0, rect.center().y);
@@ -25601,9 +25748,17 @@ impl CitrusApp {
                     Pos2::new(vx, velocity_rect.bottom() - 3.0),
                     Pos2::new(vx, vtop),
                 ],
-                Stroke::new(2.0, note_color.gamma_multiply(0.75)),
+                Stroke::new(1.5, if note.muted { face } else { note_color }),
             );
-            velocity_painter.circle_filled(Pos2::new(vx, vtop), 2.5, note_color);
+            velocity_painter.circle_filled(
+                Pos2::new(vx, vtop),
+                2.0,
+                if selected {
+                    piano_ghosts::ACTIVITY
+                } else {
+                    face
+                },
+            );
             if (grid.left()..=grid.right()).contains(&vx) {
                 let velocity_handle =
                     Rect::from_center_size(Pos2::new(vx, vtop), Vec2::splat(10.0));
@@ -25914,15 +26069,26 @@ impl CitrusApp {
                     Pos2::new(play_x, grid.top()),
                     Pos2::new(play_x, grid.bottom()),
                 ],
-                Stroke::new(1.6, theme::ORANGE),
+                Stroke::new(1.6, piano_ghosts::ACTIVITY),
             );
             painter.line_segment(
                 [
                     Pos2::new(play_x, available.top()),
                     Pos2::new(play_x, grid.top()),
                 ],
-                Stroke::new(1.6, theme::ORANGE),
+                Stroke::new(1.6, piano_ghosts::ACTIVITY),
             );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(play_x - 5.0, available.top() + 3.0),
+                    Pos2::new(play_x + 5.0, available.top() + 3.0),
+                    Pos2::new(play_x + 5.0, available.top() + 7.0),
+                    Pos2::new(play_x, available.top() + 13.0),
+                    Pos2::new(play_x - 5.0, available.top() + 7.0),
+                ],
+                piano_ghosts::ACTIVITY,
+                Stroke::NONE,
+            ));
         }
         ui.allocate_rect(available, Sense::hover());
     }
@@ -26469,10 +26635,10 @@ impl CitrusApp {
             .project
             .mixer_track_id_at_runtime_slot(active)
             .unwrap_or(MASTER_MIXER_TRACK_ID);
-        let mixer_height = ui.available_height().max(260.0);
-        let mixer_track_width =
-            ((ui.available_width() - 196.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
-                .clamp(62.0, 88.0);
+        ui.spacing_mut().interact_size.y = 18.0;
+        ui.spacing_mut().button_padding = Vec2::new(3.0, 1.0);
+        let mixer_height = ui.available_height().max(150.0);
+        let strip_width = ((ui.available_width() - 8.0) / 8.0 - 8.0).clamp(40.0, 72.0);
         let mut clicked_runtime_slot = None;
         let mut automation_request = None;
         let mut reset_meter = None;
@@ -26492,262 +26658,230 @@ impl CitrusApp {
                     )
             })
             .count();
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 5.0;
-            ui.allocate_ui_with_layout(
-                Vec2::new(180.0, mixer_height),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    egui::Frame::NONE
-                        .fill(theme::PANEL)
-                        .stroke(Stroke::new(1.0, theme::BG))
-                        .inner_margin(egui::Margin::same(8))
-                        .show(ui, |ui| {
-                            ui.set_min_size(Vec2::new(162.0, mixer_height - 18.0));
-                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
-                            ui.label(
-                                RichText::new("EFFECT RACK")
-                                    .strong()
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.menu_button("FX / ROUTING", |ui| {
+                let mixer_height: f32 = 440.0;
+                if crate::mixer_meter_ui::draw_meter(
+                    ui,
+                    self.mixer_meters.track(active as u8, active_id),
+                    active == 0,
+                    82.0,
+                ) {
+                    reset_meter = Some((active as u8, active_id));
+                }
+                ui.set_min_width(196.0);
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                ui.label(
+                    RichText::new("EFFECT RACK")
+                        .strong()
+                        .size(9.0)
+                        .color(theme::MUTED),
+                );
+                let track_name = self
+                    .project
+                    .mixer_track_id_at_runtime_slot(active)
+                    .and_then(|id| self.project.mixer_track_by_id(id))
+                    .map(|track| track.name.as_str())
+                    .unwrap_or("MASTER");
+                ui.label(
+                    RichText::new(track_name)
+                        .strong()
+                        .color(theme::ORANGE)
+                        .size(13.0),
+                );
+                ui.label(
+                    RichText::new("INSERT EFFECTS")
+                        .size(8.0)
+                        .color(theme::MUTED),
+                );
+                ui.add_space(3.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("mixer-effect-rack")
+                    .max_height((mixer_height - 160.0).max(140.0))
+                    .show(ui, |ui| {
+                        for slot in 0..MIXER_INSERT_SLOT_COUNT {
+                            let target = PluginPickerTarget::MixerSlot {
+                                track: active,
+                                slot,
+                            };
+                            let Some(plugin) = plugin_slot_view(&self.project, active, slot) else {
+                                if ui
+                                    .add_sized(
+                                        [160.0, 24.0],
+                                        egui::Button::new(
+                                            RichText::new(format!(
+                                                "{:02}    + Empty slot",
+                                                slot + 1
+                                            ))
+                                            .size(10.0)
+                                            .color(theme::MUTED),
+                                        )
+                                        .fill(theme::PANEL_ALT)
+                                        .stroke(Stroke::new(1.0, theme::BG))
+                                        .corner_radius(2),
+                                    )
+                                    .on_hover_text("Choose a VST2 or VST3 plug-in")
+                                    .clicked()
+                                {
+                                    rack_action = Some(PluginSlotAction::Pick(target));
+                                }
+                                continue;
+                            };
+
+                            let state_suffix = if plugin.bypass {
+                                " · BYPASS"
+                            } else if !plugin.enabled {
+                                " · OFF"
+                            } else {
+                                ""
+                            };
+                            let response = ui
+                                .add_sized(
+                                    [160.0, 34.0],
+                                    egui::Button::new(
+                                        RichText::new(format!(
+                                            "{:02}  {}\n     {} · {} · {} · {:.0}%{}",
+                                            slot + 1,
+                                            compact_plugin_name(&plugin.name, 19),
+                                            project_plugin_role_label(plugin.role),
+                                            project_plugin_format_label(plugin.format),
+                                            plugin_runtime_status_label(plugin.runtime_status),
+                                            plugin.wet * 100.0,
+                                            state_suffix,
+                                        ))
+                                        .size(10.0),
+                                    )
+                                    .fill(theme::PANEL_ALT)
+                                    .corner_radius(2)
+                                    .selected(plugin.enabled && !plugin.bypass),
+                                )
+                                .on_hover_text("Double-click to replace; right-click for controls");
+                            if response.double_clicked() {
+                                rack_action = Some(PluginSlotAction::Pick(target));
+                            }
+                            response.context_menu(|ui| {
+                                ui.label(RichText::new(&plugin.name).strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {} · {}",
+                                        project_plugin_role_label(plugin.role),
+                                        project_plugin_format_label(plugin.format),
+                                        plugin_runtime_status_label(plugin.runtime_status)
+                                    ))
                                     .size(9.0)
                                     .color(theme::MUTED),
-                            );
-                            let track_name = self
-                                .project
-                                .mixer_track_id_at_runtime_slot(active)
-                                .and_then(|id| self.project.mixer_track_by_id(id))
-                                .map(|track| track.name.as_str())
-                                .unwrap_or("MASTER");
-                            ui.label(
-                                RichText::new(track_name)
-                                    .strong()
-                                    .color(theme::ORANGE)
-                                    .size(13.0),
-                            );
-                            ui.label(
-                                RichText::new("INSERT EFFECTS")
-                                    .size(8.0)
-                                    .color(theme::MUTED),
-                            );
-                            ui.add_space(3.0);
-                            egui::ScrollArea::vertical()
-                                .id_salt("mixer-effect-rack")
-                                .max_height((mixer_height - 160.0).max(140.0))
-                                .show(ui, |ui| {
-                                    for slot in 0..MIXER_INSERT_SLOT_COUNT {
-                                        let target = PluginPickerTarget::MixerSlot {
-                                            track: active,
-                                            slot,
-                                        };
-                                        let Some(plugin) =
-                                            plugin_slot_view(&self.project, active, slot)
-                                        else {
-                                            if ui
-                                                .add_sized(
-                                                    [160.0, 24.0],
-                                                    egui::Button::new(
-                                                        RichText::new(format!(
-                                                            "{:02}    + Empty slot",
-                                                            slot + 1
-                                                        ))
-                                                        .size(10.0)
-                                                        .color(theme::MUTED),
-                                                    )
-                                                    .fill(theme::PANEL_ALT)
-                                                    .stroke(Stroke::new(1.0, theme::BG))
-                                                    .corner_radius(2),
-                                                )
-                                                .on_hover_text("Choose a VST2 or VST3 plug-in")
-                                                .clicked()
-                                            {
-                                                rack_action = Some(PluginSlotAction::Pick(target));
-                                            }
-                                            continue;
-                                        };
-
-                                        let state_suffix = if plugin.bypass {
-                                            " · BYPASS"
-                                        } else if !plugin.enabled {
-                                            " · OFF"
-                                        } else {
-                                            ""
-                                        };
-                                        let response = ui
-                                            .add_sized(
-                                                [160.0, 34.0],
-                                                egui::Button::new(
-                                                    RichText::new(format!(
-                                                        "{:02}  {}\n     {} · {} · {} · {:.0}%{}",
-                                                        slot + 1,
-                                                        compact_plugin_name(&plugin.name, 19),
-                                                        project_plugin_role_label(plugin.role),
-                                                        project_plugin_format_label(plugin.format),
-                                                        plugin_runtime_status_label(
-                                                            plugin.runtime_status
-                                                        ),
-                                                        plugin.wet * 100.0,
-                                                        state_suffix,
-                                                    ))
-                                                    .size(10.0),
-                                                )
-                                                .fill(theme::PANEL_ALT)
-                                                .corner_radius(2)
-                                                .selected(plugin.enabled && !plugin.bypass),
-                                            )
-                                            .on_hover_text(
-                                                "Double-click to replace; right-click for controls",
-                                            );
-                                        if response.double_clicked() {
-                                            rack_action = Some(PluginSlotAction::Pick(target));
-                                        }
-                                        response.context_menu(|ui| {
-                                            ui.label(RichText::new(&plugin.name).strong());
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{} · {} · {}",
-                                                    project_plugin_role_label(plugin.role),
-                                                    project_plugin_format_label(plugin.format),
-                                                    plugin_runtime_status_label(
-                                                        plugin.runtime_status
-                                                    )
-                                                ))
-                                                .size(9.0)
-                                                .color(theme::MUTED),
-                                            );
-                                            ui.separator();
-                                            let mut enabled = plugin.enabled;
-                                            if ui.checkbox(&mut enabled, "Enabled").changed() {
-                                                rack_action = Some(PluginSlotAction::SetEnabled {
-                                                    instance_id: plugin.instance_id,
-                                                    enabled,
-                                                });
-                                            }
-                                            let mut bypass = plugin.bypass;
-                                            if ui.checkbox(&mut bypass, "Bypass").changed() {
-                                                rack_action = Some(PluginSlotAction::SetBypass {
-                                                    instance_id: plugin.instance_id,
-                                                    bypass,
-                                                });
-                                            }
-                                            let mut wet = plugin.wet;
-                                            if ui
-                                                .add(
-                                                    egui::Slider::new(&mut wet, 0.0..=1.0)
-                                                        .text("Wet")
-                                                        .max_decimals(2),
-                                                )
-                                                .changed()
-                                            {
-                                                rack_action = Some(PluginSlotAction::SetWet {
-                                                    instance_id: plugin.instance_id,
-                                                    wet,
-                                                });
-                                            }
-                                            ui.separator();
-                                            if ui.button("Replace…").clicked() {
-                                                rack_action = Some(PluginSlotAction::Pick(target));
-                                                ui.close();
-                                            }
-                                            if ui.button("Remove").clicked() {
-                                                rack_action =
-                                                    Some(PluginSlotAction::Remove(target));
-                                                ui.close();
-                                            }
-                                        });
-                                    }
-                                });
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.label(RichText::new("ROUTING").size(8.0).color(theme::MUTED));
-                            for name in [
-                                format!("Sidechains    {sidechain_count} pending"),
-                                format!("Output        {output_summary}"),
-                                format!("Latency       {insert_latency}"),
-                            ] {
-                                ui.label(RichText::new(name).size(9.0).color(theme::MUTED));
-                            }
-                        });
-                },
-            );
-
-            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-            ui.spacing_mut().scroll.bar_width = 8.0;
-            egui::ScrollArea::horizontal()
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                .auto_shrink([false, false])
-                .max_height(mixer_height)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for (display_index, track) in
-                            self.project.mixer_tracks.iter_mut().enumerate()
-                        {
-                            let runtime_slot = usize::from(track.runtime_slot);
-                            let selected = runtime_slot == active;
+                                );
+                                ui.separator();
+                                let mut enabled = plugin.enabled;
+                                if ui.checkbox(&mut enabled, "Enabled").changed() {
+                                    rack_action = Some(PluginSlotAction::SetEnabled {
+                                        instance_id: plugin.instance_id,
+                                        enabled,
+                                    });
+                                }
+                                let mut bypass = plugin.bypass;
+                                if ui.checkbox(&mut bypass, "Bypass").changed() {
+                                    rack_action = Some(PluginSlotAction::SetBypass {
+                                        instance_id: plugin.instance_id,
+                                        bypass,
+                                    });
+                                }
+                                let mut wet = plugin.wet;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut wet, 0.0..=1.0)
+                                            .text("Wet")
+                                            .max_decimals(2),
+                                    )
+                                    .changed()
+                                {
+                                    rack_action = Some(PluginSlotAction::SetWet {
+                                        instance_id: plugin.instance_id,
+                                        wet,
+                                    });
+                                }
+                                ui.separator();
+                                if ui.button("Replace…").clicked() {
+                                    rack_action = Some(PluginSlotAction::Pick(target));
+                                    ui.close();
+                                }
+                                if ui.button("Remove").clicked() {
+                                    rack_action = Some(PluginSlotAction::Remove(target));
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(RichText::new("ROUTING").size(8.0).color(theme::MUTED));
+                for name in [
+                    format!("Sidechains    {sidechain_count} pending"),
+                    format!("Output        {output_summary}"),
+                    format!("Latency       {insert_latency}"),
+                ] {
+                    ui.label(RichText::new(name).size(9.0).color(theme::MUTED));
+                }
+            });
+            ui.label(RichText::new(&output_summary).size(9.0).color(theme::MUTED));
+        });
+        let fader_height = (mixer_height - 120.0).clamp(30.0, 300.0);
+        egui::ScrollArea::horizontal()
+            .id_salt("compact-mixer-strips")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    for track in &mut self.project.mixer_tracks {
+                        let runtime_slot = usize::from(track.runtime_slot);
+                        let selected = runtime_slot == active;
+                        ui.push_id(("mixer-strip", track.id), |ui| {
                             egui::Frame::NONE
                                 .fill(if selected {
-                                    theme::RAISED
-                                } else if display_index % 2 == 0 {
                                     theme::PANEL_ALT
                                 } else {
                                     theme::PANEL
                                 })
-                                .stroke(Stroke::new(
-                                    1.0,
-                                    if selected {
-                                        theme::ORANGE_DIM
-                                    } else {
-                                        theme::BG
-                                    },
-                                ))
-                                .inner_margin(egui::Margin::symmetric(6, 6))
+                                .stroke(Stroke::new(1.0, theme::GRID.gamma_multiply(0.5)))
+                                .corner_radius(3)
+                                .inner_margin(egui::Margin::symmetric(2, 3))
                                 .show(ui, |ui| {
-                                    ui.set_width(mixer_track_width);
-                                    ui.set_height(mixer_height - 30.0);
-                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                                    ui.set_width(strip_width);
+                                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
                                     ui.vertical_centered(|ui| {
-                                        let header = ui
+                                        if ui
                                             .add_sized(
-                                                [mixer_track_width, 22.0],
+                                                [strip_width, 16.0],
                                                 egui::Button::new(
-                                                    RichText::new(format!("{:02}", runtime_slot))
-                                                        .monospace()
-                                                        .size(9.0)
-                                                        .color(if selected {
+                                                    RichText::new(&track.name).size(9.0).color(
+                                                        if selected {
                                                             theme::ORANGE
                                                         } else {
                                                             theme::MUTED
-                                                        }),
+                                                        },
+                                                    ),
                                                 )
-                                                .fill(theme::BG)
+                                                .fill(Color32::TRANSPARENT)
                                                 .stroke(Stroke::NONE)
-                                                .corner_radius(2),
+                                                .truncate(),
                                             )
-                                            .on_hover_text(&track.name);
-                                        ui.painter().rect_filled(
-                                            Rect::from_min_size(
-                                                header.rect.min,
-                                                Vec2::new(header.rect.width(), 3.0),
-                                            ),
-                                            1.0,
-                                            theme::color(track.color),
-                                        );
-                                        if header.clicked() {
+                                            .on_hover_text(format!(
+                                                "{} · Insert {}",
+                                                track.name, runtime_slot
+                                            ))
+                                            .clicked()
+                                        {
                                             clicked_runtime_slot = Some(runtime_slot);
-                                        }
-                                        let reading =
-                                            self.mixer_meters.track(track.runtime_slot, track.id);
-                                        if crate::mixer_meter_ui::draw_meter(
-                                            ui,
-                                            reading,
-                                            runtime_slot == 0,
-                                            82.0,
-                                        ) {
-                                            reset_meter = Some((track.runtime_slot, track.id));
                                         }
                                         let pan = mixer_pan_knob(
                                             ui,
                                             &mut track.pan,
-                                            theme::color(track.color),
+                                            if selected {
+                                                theme::ORANGE
+                                            } else {
+                                                theme::MUTED
+                                            },
                                         );
                                         native_automation::control_menu(
                                             &pan,
@@ -26760,24 +26894,48 @@ impl CitrusApp {
                                                 pan: track.pan,
                                             });
                                         }
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            ui.add_space(((strip_width - 35.0) * 0.5).max(0.0));
+                                            let reading = self
+                                                .mixer_meters
+                                                .track(track.runtime_slot, track.id);
+                                            if compact_mixer_meter(ui, reading, fader_height) {
+                                                reset_meter = Some((track.runtime_slot, track.id));
+                                            }
+                                            let fader = compact_mixer_fader(
+                                                ui,
+                                                &mut track.volume,
+                                                fader_height,
+                                                selected,
+                                            );
+                                            native_automation::control_menu(
+                                                &fader,
+                                                AutomationTarget::MixerVolume { track: track.id },
+                                                &mut automation_request,
+                                            );
+                                            if fader.dragged() || fader.clicked() {
+                                                audio_commands.push(AudioCommand::SetTrackGain {
+                                                    track: runtime_slot,
+                                                    gain: track.volume,
+                                                });
+                                            }
+                                        });
                                         ui.label(
-                                            RichText::new("PAN").size(7.0).color(theme::MUTED),
+                                            RichText::new(mixer_gain_label(track.volume))
+                                                .monospace()
+                                                .size(9.0)
+                                                .color(theme::MUTED),
                                         );
                                         ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            ui.add_space(((strip_width - 41.0) * 0.5).max(0.0));
                                             if ui
                                                 .add_sized(
-                                                    [29.0, 22.0],
-                                                    egui::Button::new(
-                                                        RichText::new("M").size(10.0),
+                                                    [19.0, 18.0],
+                                                    theme::Button::new(
+                                                        RichText::new("M").size(9.0),
                                                     )
-                                                    .corner_radius(2)
-                                                    .fill(if track.muted {
-                                                        theme::ORANGE_DIM
-                                                    } else {
-                                                        theme::WELL
-                                                    })
-                                                    .stroke(Stroke::new(1.0, theme::GRID))
                                                     .selected(track.muted),
                                                 )
                                                 .on_hover_text("Mute this mixer track")
@@ -26791,17 +26949,10 @@ impl CitrusApp {
                                             }
                                             if ui
                                                 .add_sized(
-                                                    [29.0, 22.0],
-                                                    egui::Button::new(
-                                                        RichText::new("S").size(10.0),
+                                                    [19.0, 18.0],
+                                                    theme::Button::new(
+                                                        RichText::new("S").size(9.0),
                                                     )
-                                                    .corner_radius(2)
-                                                    .fill(if track.solo {
-                                                        theme::ORANGE_DIM
-                                                    } else {
-                                                        theme::WELL
-                                                    })
-                                                    .stroke(Stroke::new(1.0, theme::GRID))
                                                     .selected(track.solo),
                                                 )
                                                 .on_hover_text("Solo this mixer track")
@@ -26814,69 +26965,12 @@ impl CitrusApp {
                                                 });
                                             }
                                         });
-                                        let fader = vertical_fader(
-                                            ui,
-                                            &mut track.volume,
-                                            (mixer_height - 280.0).max(70.0),
-                                        );
-                                        native_automation::control_menu(
-                                            &fader,
-                                            AutomationTarget::MixerVolume { track: track.id },
-                                            &mut automation_request,
-                                        );
-                                        if fader.dragged() || fader.clicked() {
-                                            audio_commands.push(AudioCommand::SetTrackGain {
-                                                track: runtime_slot,
-                                                gain: track.volume,
-                                            });
-                                        }
-                                        ui.label(
-                                            RichText::new(mixer_gain_label(track.volume))
-                                                .monospace()
-                                                .size(9.0)
-                                                .color(theme::MUTED),
-                                        );
-                                        let (bar, response) = ui.allocate_exact_size(
-                                            Vec2::new(mixer_track_width, 3.0),
-                                            Sense::click(),
-                                        );
-                                        ui.painter().rect_filled(
-                                            bar,
-                                            1.0,
-                                            theme::color(track.color),
-                                        );
-                                        if response.clicked() {
-                                            clicked_runtime_slot = Some(runtime_slot);
-                                        }
-                                        if ui
-                                            .add_sized(
-                                                [mixer_track_width, 22.0],
-                                                egui::Button::new(
-                                                    RichText::new(&track.name)
-                                                        .size(10.0)
-                                                        .strong()
-                                                        .color(if selected {
-                                                            theme::ORANGE
-                                                        } else {
-                                                            theme::TEXT
-                                                        }),
-                                                )
-                                                .fill(theme::PANEL)
-                                                .stroke(Stroke::NONE)
-                                                .corner_radius(2)
-                                                .truncate(),
-                                            )
-                                            .on_hover_text(&track.name)
-                                            .clicked()
-                                        {
-                                            clicked_runtime_slot = Some(runtime_slot);
-                                        }
                                     });
                                 });
-                        }
-                    });
+                        });
+                    }
                 });
-        });
+            });
         if let Some(target) = automation_request {
             self.create_or_open_native_automation(target);
         }
@@ -32166,6 +32260,88 @@ fn mixer_pan_knob(ui: &mut egui::Ui, value: &mut f32, accent: Color32) -> Respon
     response.on_hover_text(format!("Pan {:+.0}% · drag vertically", *value * 100.0))
 }
 
+/// Dense console meter. Measurements remain real graph/device readings; no decorative levels.
+fn compact_mixer_meter(
+    ui: &mut egui::Ui,
+    reading: crate::audio_meter::MeterReading,
+    height: f32,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(10.0, height), Sense::click());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 2, theme::WELL);
+    for channel in 0..2 {
+        let x = rect.left() + 1.0 + channel as f32 * 4.0;
+        if reading.available && !reading.invalid {
+            let fraction = crate::audio_meter::meter_fraction(reading.peak[channel]);
+            let y = rect.bottom() - fraction * rect.height();
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(x, y), Pos2::new(x + 3.0, rect.bottom())),
+                1,
+                theme::GREEN,
+            );
+            let hold = crate::audio_meter::meter_fraction(reading.held_peak[channel]);
+            if hold > 0.0 {
+                let y = rect.bottom() - hold * rect.height();
+                painter.line_segment(
+                    [Pos2::new(x, y), Pos2::new(x + 3.0, y)],
+                    Stroke::new(1.0, theme::TEXT),
+                );
+            }
+        }
+    }
+    if reading.clipped || reading.invalid {
+        painter.rect_filled(
+            Rect::from_min_size(rect.min, Vec2::new(10.0, 3.0)),
+            1,
+            theme::RED,
+        );
+    }
+    response.on_hover_text(if !reading.available { "No current graph/device measurement. Click to reset peak hold/CLIP." }
+        else if reading.invalid { "Non-finite samples; measurement unavailable. Click to reset peak hold/CLIP." }
+        else { "Stereo sample peak after effects/fader/pan/mute; −60 to 0 dBFS. Not RMS/loudness/true peak. Click to reset peak hold/CLIP." }).clicked()
+}
+
+fn compact_mixer_fader(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    height: f32,
+    selected: bool,
+) -> Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(22.0, height.max(24.0)), Sense::click_and_drag());
+    let travel = (rect.bottom() - 5.0)..=(rect.top() + 5.0);
+    if (response.dragged() || response.clicked())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        *value = egui::remap_clamp(pointer.y, travel.clone(), 0.0..=1.0);
+    }
+    response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), f64::from(*value), "Gain"));
+    let painter = ui.painter();
+    painter.rect_filled(
+        Rect::from_center_size(rect.center(), Vec2::new(4.0, rect.height())),
+        2,
+        theme::WELL,
+    );
+    let center = Pos2::new(rect.center().x, egui::lerp(travel, *value));
+    painter.rect_filled(
+        Rect::from_center_size(center, Vec2::new(14.0, 10.0)),
+        2,
+        if selected {
+            theme::ORANGE
+        } else {
+            theme::HIGHLIGHT
+        },
+    );
+    painter.line_segment(
+        [center - Vec2::new(5.0, 0.0), center + Vec2::new(5.0, 0.0)],
+        Stroke::new(1.0, theme::TEXT),
+    );
+    response.on_hover_text(format!(
+        "Gain {} dB · drag vertically; right-click for automation",
+        mixer_gain_label(*value)
+    ))
+}
+
 fn mixer_gain_label(value: f32) -> String {
     if value > 0.0 {
         format!("{:+.1}", 20.0 * value.log10())
@@ -32174,6 +32350,7 @@ fn mixer_gain_label(value: f32) -> String {
     }
 }
 
+#[cfg(test)] // Legacy full-height geometry oracle; production uses compact_mixer_fader.
 fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(48.0, height.max(24.0)), Sense::click_and_drag());

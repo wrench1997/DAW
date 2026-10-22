@@ -103,7 +103,7 @@ fn minimum(view: StudioView) -> Vec2 {
         StudioView::Playlist => Vec2::new(460.0, 310.0),
         StudioView::ChannelRack => Vec2::new(400.0, 240.0),
         StudioView::PianoRoll => Vec2::new(480.0, 420.0),
-        StudioView::Mixer => Vec2::new(440.0, 410.0),
+        StudioView::Mixer => Vec2::new(400.0, 180.0),
     }
 }
 
@@ -361,52 +361,24 @@ fn bounded_rect(rect: Rect, bounds: Rect, view: StudioView) -> Rect {
 }
 
 fn initial_rect(view: StudioView, bounds: Rect) -> Rect {
-    // A coherent two-column desktop rather than four oversized cascading canvases.
-    // Small workspaces retain exposed title bars and the existing maximize workflow.
-    let gap = 4.0;
-    let left = (bounds.width() * 0.52).round();
-    let rack_height = 258.0_f32.min(bounds.height() * 0.42);
-    let playlist_height = (bounds.height() * 0.48)
-        .min(
-            (bounds.height() - minimum(StudioView::Mixer).y)
-                .max(minimum(StudioView::Playlist).y + gap),
-        )
-        .round();
-    let (offset, size) = if bounds.width() >= 1080.0 && bounds.height() >= 724.0 {
-        match view {
-            StudioView::Playlist => (Vec2::ZERO, Vec2::new(left - gap, playlist_height - gap)),
-            StudioView::Mixer => (
-                Vec2::new(0.0, playlist_height),
-                Vec2::new(left - gap, bounds.height() - playlist_height),
-            ),
-            StudioView::ChannelRack => (
-                Vec2::new(left, 0.0),
-                Vec2::new(bounds.width() - left, rack_height - gap),
-            ),
-            StudioView::PianoRoll => (
-                Vec2::new(left, rack_height),
-                Vec2::new(bounds.width() - left, bounds.height() - rack_height),
-            ),
-        }
-    } else {
-        match view {
-            StudioView::Playlist => (
-                Vec2::ZERO,
-                Vec2::new(bounds.width() * 0.78, bounds.height() * 0.56),
-            ),
-            StudioView::ChannelRack => (
-                Vec2::new(bounds.width() * 0.35, 28.0),
-                Vec2::new(bounds.width() * 0.65, rack_height),
-            ),
-            StudioView::Mixer => (
-                Vec2::new(0.0, bounds.height() * 0.42),
-                Vec2::new(bounds.width() * 0.60, bounds.height() * 0.58),
-            ),
-            StudioView::PianoRoll => (
-                Vec2::new(bounds.width() * 0.30, bounds.height() * 0.32),
-                Vec2::new(bounds.width() * 0.70, bounds.height() * 0.68),
-            ),
-        }
+    // Composition follows the instrument workflow: arrangement and rack above,
+    // a wide score at lower right, compact mixer below the instrument at left.
+    // These are defaults only; persisted user window geometry remains untouched.
+    let w = bounds.width();
+    let h = bounds.height();
+    let top_height = (h * 0.36).max(minimum(StudioView::Playlist).y);
+    let score_top = (top_height + 4.0).min(h - minimum(StudioView::PianoRoll).y);
+    let (offset, size) = match view {
+        StudioView::Playlist => (Vec2::ZERO, Vec2::new(w * 0.67 - 4.0, top_height)),
+        StudioView::ChannelRack => (Vec2::new(w * 0.67, 0.0), Vec2::new(w * 0.33, top_height)),
+        StudioView::PianoRoll => (
+            Vec2::new(w * 0.35, score_top),
+            Vec2::new(w * 0.65, h - score_top),
+        ),
+        StudioView::Mixer => (
+            Vec2::new(0.0, h * 0.78),
+            Vec2::new(w * 0.35 - 4.0, h * 0.22),
+        ),
     };
     bounded_rect(Rect::from_min_size(bounds.min + offset, size), bounds, view)
 }
@@ -438,6 +410,9 @@ impl CitrusApp {
     fn arrange_editors(&mut self, cascade: bool) {
         self.finish_editor_interaction();
         self.workspace.arrange(cascade);
+        if !cascade {
+            self.request_sampler_reposition();
+        }
     }
 
     pub(super) fn commit_editor_project(&mut self, candidate: Project) {
@@ -940,10 +915,10 @@ impl CitrusApp {
                 .frame(
                     egui::Frame::window(ui.style())
                         .inner_margin(egui::Margin::symmetric(2, 1))
-                        .corner_radius(3)
+                        .corner_radius(5)
                         .shadow(egui::epaint::Shadow {
-                            offset: [0, 2],
-                            blur: 8,
+                            offset: [0, 3],
+                            blur: 12,
                             spread: 0,
                             color: Color32::from_black_alpha(80),
                         })
@@ -1053,13 +1028,12 @@ impl CitrusApp {
             StudioView::PianoRoll => self.piano_roll(ui),
             StudioView::Mixer => self.mixer(ui),
             StudioView::ChannelRack => {
-                egui::ScrollArea::both()
+                // Keep the rack's responsive layout tied to the visible window width.
+                // A horizontal scroll content minimum bypasses compact mode entirely.
+                egui::ScrollArea::vertical()
                     .id_salt("channel-rack-scroll")
                     .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.set_min_width(768.0);
-                        self.channel_rack(ui);
-                    });
+                    .show(ui, |ui| self.channel_rack(ui));
             }
         }
         if sizing {
@@ -1130,19 +1104,25 @@ mod tests {
     }
 
     #[test]
-    fn tiled_defaults_respect_editor_minima_at_laptop_boundary_heights() {
+    fn composed_defaults_expose_titles_and_keep_a_wide_score_at_laptop_sizes() {
         for height in [724.0, 740.0, 768.0, 900.0, 1080.0] {
             let bounds = Rect::from_min_size(Pos2::new(200.0, 130.0), Vec2::new(1200.0, height));
-            for (i, view) in EDITORS.into_iter().enumerate() {
+            for view in EDITORS {
                 let rect = initial_rect(view, bounds);
                 assert!(bounds.contains_rect(rect));
-                for other in EDITORS.into_iter().skip(i + 1) {
-                    assert!(
-                        !rect.intersect(initial_rect(other, bounds)).is_positive(),
-                        "overlap at {height}: {view:?} / {other:?}"
-                    );
-                }
+                assert!(rect.width() >= minimum(view).x);
+                assert!(rect.height() >= minimum(view).y);
             }
+            let piano = initial_rect(StudioView::PianoRoll, bounds);
+            let mixer = initial_rect(StudioView::Mixer, bounds);
+            let playlist = initial_rect(StudioView::Playlist, bounds);
+            let rack = initial_rect(StudioView::ChannelRack, bounds);
+            assert!(piano.width() >= bounds.width() * 0.64);
+            assert!(mixer.height() <= bounds.height() * 0.26);
+            assert!(playlist.top() < piano.top());
+            assert!(rack.top() < piano.top());
+            assert!(piano.left() > playlist.left());
+            assert!(mixer.left() < piano.left());
         }
     }
 

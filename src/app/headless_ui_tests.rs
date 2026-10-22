@@ -459,6 +459,7 @@ fn full_app_decoded_waveform_preview_is_real_audio_at_both_window_sizes() {
     let path = fixture.0.join("QA - decoded pulse.wav");
     std::fs::write(&path, &wav).unwrap();
     let mut ui = UiHarness::new();
+    ui.click("SOUNDS");
     ui.app.sample_browser.navigate(fixture.0.clone());
     ui.wait_until(|app| !app.sample_browser.busy());
     ui.click("QA - decoded pulse.wav");
@@ -480,6 +481,7 @@ fn full_app_decoded_waveform_preview_is_real_audio_at_both_window_sizes() {
 fn full_app_browser_import_failure_recovery_undo_redo_and_dirty_cancel() {
     let fixture = Fixture::new();
     let mut ui = UiHarness::new();
+    ui.click("SOUNDS");
     assert!(ui.button("Up").is_disabled());
     assert!(ui.button("Import to Playlist").is_disabled());
     // The fixture enters at the native folder-picker return boundary. Listing, selection,
@@ -535,6 +537,7 @@ fn full_app_browser_import_failure_recovery_undo_redo_and_dirty_cancel() {
 fn full_app_browser_search_focus_and_refresh_selection_are_real_ui_events() {
     let fixture = Fixture::new();
     let mut ui = UiHarness::new();
+    ui.click("SOUNDS");
     ui.app.sample_browser.navigate(fixture.0.clone());
     ui.wait_until(|app| !app.sample_browser.busy());
     ui.click("valid.wav");
@@ -2660,7 +2663,7 @@ fn compact_workspace_default_and_repeated_arrange_use_the_available_desktop() {
 include!("workspace_motion_benchmark.rs");
 
 #[test]
-fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
+fn compact_rack_all_sixteen_steps_fit_real_floating_window() {
     let mut ui = UiHarness::floating();
     ui.size = Vec2::new(1080.0, 680.0);
     ui.settle();
@@ -2672,50 +2675,34 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
         StudioView::ChannelRack,
     );
     let rack = ui.editor_rect(StudioView::ChannelRack);
-    let channel = ui.app.project.channels[0].name.clone();
-    for label in [
-        &channel,
-        &format!("Mute {channel}"),
-        &format!("Solo {channel}"),
-        &format!("{channel} step 1"),
-    ] {
-        let node = ui.button(label);
-        let bounds = node.bounds().unwrap();
-        assert!(
-            bounds.y1 - bounds.y0 >= 23.5,
-            "compact hit height must remain 24 points: {label} {bounds:?}"
-        );
-        assert!(
-            bounds.x1 - bounds.x0 >= 23.5,
-            "compact hit width must remain 24 points: {label} {bounds:?}"
-        );
+    assert!(
+        rack.width() <= 410.0,
+        "test must exercise a genuinely narrow rack: {rack:?}"
+    );
+    for channel in &ui.app.project.channels {
+        for step in 1..=16 {
+            let label = format!("{} step {step}", channel.name);
+            let bounds = ui.button(&label).bounds().unwrap();
+            let rect = Rect::from_min_max(
+                Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+                Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+            );
+            assert!(
+                rack.contains_rect(rect),
+                "all 16 steps must fit without horizontal scrolling: {label} {rect:?} / {rack:?}"
+            );
+            assert!(
+                rect.width() >= 8.0 && rect.height() >= 23.5,
+                "step hit target too small: {rect:?}"
+            );
+        }
     }
+    let channel = ui.app.project.channels[0].name.clone();
     let muted = ui.app.project.channels[0].muted;
     ui.click(&format!("Mute {channel}"));
     assert_eq!(ui.app.project.channels[0].muted, !muted);
     ui.click(&format!("Mute {channel}"));
     let step_before = ui.app.project.active_pattern().channel_steps[0][15];
-    ui.run(vec![
-        egui::Event::PointerMoved(rack.center()),
-        egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            phase: egui::TouchPhase::Move,
-            delta: Vec2::new(-600.0, 0.0),
-            modifiers: egui::Modifiers::NONE,
-        },
-    ]);
-    for _ in 0..10 {
-        ui.run(Vec::new());
-    }
-    let bounds = ui.button(&format!("{channel} step 16")).bounds().unwrap();
-    let center = Pos2::new(
-        ((bounds.x0 + bounds.x1) / 2.0) as f32,
-        ((bounds.y0 + bounds.y1) / 2.0) as f32,
-    );
-    assert!(
-        rack.contains(center),
-        "last step must be reachable by real horizontal scroll: {center:?} / {rack:?}"
-    );
     ui.click(&format!("{channel} step 16"));
     assert_eq!(
         ui.app.project.active_pattern().channel_steps[0][15],

@@ -132,6 +132,7 @@ fn audio_ui() -> (UiHarness, Fixture) {
     }
     std::fs::write(fixture.0.join("constant.wav"), wav).unwrap();
     let mut ui = blank_ui();
+    ui.click("SOUNDS");
     ui.app.sample_browser.navigate(fixture.0.clone());
     ui.wait_until(|app| !app.sample_browser.busy());
     ui.click("constant.wav");

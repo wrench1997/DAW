@@ -4,20 +4,21 @@ use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, Style, TextStyle, Visuals,
 };
 
-// A cool, layered workstation palette. Color belongs to musical content;
-// orange is reserved for selection, transport, and the Citrus identity.
-pub const BG: Color32 = Color32::from_rgb(25, 28, 33);
-pub const PANEL: Color32 = Color32::from_rgb(34, 38, 44);
-pub const PANEL_ALT: Color32 = Color32::from_rgb(41, 46, 53);
-pub const RAISED: Color32 = Color32::from_rgb(49, 55, 63);
-pub const GRID: Color32 = Color32::from_rgb(54, 61, 69);
+// Graphite workstation surfaces: dark wells, restrained raised controls and
+// warm amber activity. Teal belongs to editable musical content, never chrome.
+pub const BG: Color32 = Color32::from_rgb(23, 28, 33);
+pub const PANEL: Color32 = Color32::from_rgb(30, 37, 43);
+pub const PANEL_ALT: Color32 = Color32::from_rgb(37, 45, 52);
+pub const RAISED: Color32 = Color32::from_rgb(45, 54, 62);
+pub const GRID: Color32 = Color32::from_rgb(48, 59, 68);
 pub const TEXT: Color32 = Color32::from_rgb(229, 233, 238);
 pub const MUTED: Color32 = Color32::from_rgb(157, 167, 178);
-pub const ORANGE: Color32 = Color32::from_rgb(238, 175, 101);
-pub const ORANGE_DIM: Color32 = Color32::from_rgb(77, 62, 44);
-pub const WELL: Color32 = Color32::from_rgb(21, 24, 29);
+pub const ORANGE: Color32 = Color32::from_rgb(242, 167, 64);
+pub const ORANGE_DIM: Color32 = Color32::from_rgb(75, 56, 33);
+pub const CHROME: Color32 = Color32::from_rgb(27, 34, 40);
+pub const WELL: Color32 = Color32::from_rgb(18, 24, 29);
 pub const HIGHLIGHT: Color32 = Color32::from_rgb(70, 80, 92);
-pub const GREEN: Color32 = Color32::from_rgb(96, 211, 177);
+pub const GREEN: Color32 = Color32::from_rgb(76, 190, 166);
 pub const RED: Color32 = Color32::from_rgb(244, 92, 106);
 pub const BLUE: Color32 = Color32::from_rgb(103, 161, 255);
 pub const AMBER: Color32 = Color32::from_rgb(247, 194, 86);
@@ -60,7 +61,13 @@ pub fn button_face(
     focused: bool,
 ) -> egui::Shape {
     egui::Shape::Vec(vec![
-        egui::Shape::rect_filled(rect, 3, fill),
+        egui::Shape::rect_filled(rect, 4, fill),
+        egui::Shape::rect_stroke(
+            rect.shrink(0.5),
+            4,
+            Stroke::new(0.7, mix(fill, GRID, 0.45)),
+            egui::StrokeKind::Inside,
+        ),
         if focused {
             egui::Shape::rect_stroke(
                 rect.shrink(0.5),
@@ -168,11 +175,12 @@ pub fn install(ctx: &egui::Context) {
     let mut visuals = Visuals::dark();
     visuals.panel_fill = PANEL;
     visuals.window_fill = PANEL;
+    visuals.window_highlight_topmost = true;
     visuals.extreme_bg_color = BG;
     visuals.faint_bg_color = PANEL_ALT;
     visuals.override_text_color = Some(TEXT);
     visuals.window_stroke = Stroke::new(1.0, GRID);
-    visuals.window_corner_radius = egui::CornerRadius::same(4);
+    visuals.window_corner_radius = egui::CornerRadius::same(5);
     visuals.widgets.noninteractive.bg_fill = PANEL_ALT;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, GRID);
     visuals.widgets.inactive.bg_fill = RAISED;

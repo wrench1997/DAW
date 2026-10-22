@@ -125,6 +125,9 @@ fn has_text(shape: &egui::Shape, text: &str) -> bool {
 fn playlist_pattern_double_click_auto_locates_notes_and_clicked_source_bar_without_seek() {
     let mut ui = UiHarness::new();
     install_linked_project(&mut ui);
+    // Use the editing zoom to require actual source-bar scrolling. At the new
+    // overview zoom this short phrase is already visible without any scroll.
+    ui.app.piano_viewport.x.zoom_at_pixel(0.0, 2.5).unwrap();
     let clips = serde_json::to_value(&ui.app.project.clips).unwrap();
     let patterns = serde_json::to_value(&ui.app.project.patterns).unwrap();
     let canvas = ui

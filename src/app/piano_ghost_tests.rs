@@ -254,7 +254,8 @@ fn piano_ghost_long_reference_tail_is_reachable_without_changing_playback_or_fit
         assert!(ui.app.undo_stack.is_empty());
 
         // Fit remains a target-only operation, even while a far reference is visible.
-        ui.click("FIT NOTES");
+        ui.click("TOOLS v");
+    ui.click("FIT NOTES");
         assert!(content_span_is_visible(
             ui.app.piano_viewport.x,
             0.375,
@@ -284,7 +285,8 @@ fn piano_ghost_long_reference_tail_is_reachable_without_changing_playback_or_fit
         );
         // Clamping a far view cannot invalidate note positioning: Fit still reveals
         // the exact target note and its real editable widget at the same local beat.
-        ui.click("FIT NOTES");
+        ui.click("TOOLS v");
+    ui.click("FIT NOTES");
         let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
         let target = ui
             .ctx
@@ -323,8 +325,8 @@ fn piano_ghost_scope_toggle_keeps_grid_origin_and_toolbar_rows_stable() {
         let project = project_fingerprint(&ui.app.project);
         let selection = ui.app.piano_roll_state.selection_ids.clone();
         let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
-        let view = node_rect(ui.button("VIEW v"));
-        let fit = node_rect(ui.button("FIT NOTES"));
+        let view = node_rect(ui.button("NOTE EDIT v"));
+        let fit = node_rect(ui.button("TOOLS v"));
         let window = ui.editor_rect(StudioView::PianoRoll);
         assert!(
             window.width() <= width + 4.0,
@@ -343,8 +345,8 @@ fn piano_ghost_scope_toggle_keeps_grid_origin_and_toolbar_rows_stable() {
                 grid.top(),
                 "scope changed grid origin at width {width}"
             );
-            assert_eq!(node_rect(ui.button("VIEW v")), view);
-            assert_eq!(node_rect(ui.button("FIT NOTES")), fit);
+            assert_eq!(node_rect(ui.button("NOTE EDIT v")), view);
+            assert_eq!(node_rect(ui.button("TOOLS v")), fit);
             assert_eq!(project_fingerprint(&ui.app.project), project);
             assert_eq!(ui.app.piano_roll_state.selection_ids, selection);
             assert!(!ui.app.dirty);
@@ -352,4 +354,81 @@ fn piano_ghost_scope_toggle_keeps_grid_origin_and_toolbar_rows_stable() {
             ui.key(egui::Key::V, egui::Modifiers::ALT);
         }
     }
+}
+
+#[test]
+fn piano_score_faces_distinguish_editable_selected_muted_and_reference_notes() {
+    use crate::piano_roll::PianoGhostSource;
+    fn has_face(output: &egui::FullOutput, wanted: Rect, color: Color32) -> bool {
+        fn matches(shape: &egui::Shape, wanted: Rect, color: Color32) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => rect.rect == wanted && rect.fill == color,
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| matches(shape, wanted, color))
+                }
+                _ => false,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .any(|shape| matches(&shape.shape, wanted, color))
+    }
+    let mut ui = UiHarness::floating();
+    let channel = piano_clipboard_fixture(&mut ui);
+    ui.app.workspace.maximized = true;
+    ui.app.piano_roll_state.clear_selection();
+    let editable = ui
+        .app
+        .project
+        .active_pattern()
+        .notes
+        .iter()
+        .find(|note| note.channel_id == Some(channel))
+        .unwrap()
+        .clone();
+    let mut reference = ui.app.project.active_pattern().clone();
+    reference.id = 987;
+    reference.notes = vec![PianoNote {
+        id: 9_000_001,
+        note: editable.note.saturating_sub(2),
+        ..editable.clone()
+    }];
+    ui.app.project.patterns.push(reference);
+    ui.app.piano_roll_state.ghost_source = PianoGhostSource::ReferencePattern(987);
+    ui.settle();
+    let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+    let note_rect = piano_mouse::note_rects(grid, ui.app.piano_viewport, &editable).1;
+    let ghost = &ui.app.project.patterns.last().unwrap().notes[0];
+    let ghost_rect = piano_mouse::note_rects(grid, ui.app.piano_viewport, ghost).1;
+    let ghost_id = ghost.id;
+    let before = project_fingerprint(&ui.app.project);
+    let output = ui.run(vec![]);
+    assert!(has_face(&output, note_rect, piano_ghosts::NOTE_FACE));
+    assert!(has_face(&output, ghost_rect, piano_ghosts::GHOST_FACE));
+    assert_ne!(piano_ghosts::NOTE_FACE, piano_ghosts::GHOST_FACE);
+    assert!(
+        ui.ctx
+            .read_response(Id::new(("piano-note", ghost_id)))
+            .is_none()
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.app.piano_roll_state.select_only(editable.id);
+    let output = ui.run(vec![]);
+    assert!(has_face(
+        &output,
+        note_rect,
+        Color32::from_rgb(104, 213, 187)
+    ));
+    ui.app
+        .project
+        .active_pattern_mut()
+        .notes
+        .iter_mut()
+        .find(|n| n.id == editable.id)
+        .unwrap()
+        .muted = true;
+    let output = ui.run(vec![]);
+    assert!(has_face(&output, note_rect, Color32::from_rgb(60, 73, 73)));
+    ui.capture("piano-fl-score-visual-hierarchy");
 }

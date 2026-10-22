@@ -235,6 +235,17 @@ fn fit_piano_notes(viewport: &mut Viewport2D, notes: &[PianoNote], channel: Opti
 mod tests {
     use super::*;
 
+    #[test]
+    fn initial_score_overview_frames_eight_bars_and_two_octaves_around_middle_c() {
+        let viewport = default_piano_viewport();
+        assert_eq!(viewport.x.pixels_per_unit(), 24.0);
+        assert_eq!(viewport.x.visible_range(), (0.0, 32.0));
+        assert_eq!(viewport.y.pixels_per_unit(), 12.0);
+        let (top, bottom) = viewport.y.visible_range();
+        assert_eq!(bottom - top, 28.0);
+        assert_eq!(piano_pitch_row(60), (top + bottom) * 0.5);
+    }
+
     fn note(channel: Option<u32>, start: f32, length: f32, pitch: u8) -> PianoNote {
         PianoNote {
             id: 1,
