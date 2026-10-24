@@ -43,12 +43,12 @@ fn bars_label(beats: f32) -> String {
 
 fn mode_button(ui: &mut egui::Ui, mode: TransportMode, selected: bool) -> Response {
     let (label, accent) = match mode {
-        TransportMode::Pattern => ("PAT", theme::GREEN),
+        TransportMode::Pattern => ("PAT", theme::ORANGE),
         TransportMode::Song => ("SONG", theme::ORANGE),
     };
     let face = ui.painter().add(egui::Shape::Noop);
     let response = ui.add_sized(
-        [46.0, 19.0],
+        [48.0, 34.0],
         egui::Button::new(RichText::new(label).strong().size(9.0).color(if selected {
             theme::WELL
         } else {
@@ -80,8 +80,8 @@ impl CitrusApp {
     pub(super) fn transport_mode_controls(&mut self, ui: &mut egui::Ui) {
         let mut requested_mode = None;
         let mut requested_view = None;
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             for (mode, hint, view) in [
                 (
                     TransportMode::Pattern,

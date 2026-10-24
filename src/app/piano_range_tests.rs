@@ -489,6 +489,10 @@ fn piano_range_covered_window_never_claims_a_frontmost_pointer_drag() {
 fn piano_range_paste_uses_viewport_bar_in_both_transport_modes() {
     for mode in [TransportMode::Pattern, TransportMode::Song] {
         let mut ui = fixture();
+        // Establish scroll room for this paste-at-viewport-bar test; the new
+        // overview can display the whole short phrase without scrolling.
+        ui.app.piano_viewport.x.zoom_at_pixel(0.0, 2.5).unwrap();
+        ui.settle();
         ui.app.project.active_pattern_mut().length_steps = 256;
         reset_history(&mut ui);
         ui.key(egui::Key::A, piano_clipboard_command());
@@ -1145,4 +1149,33 @@ fn piano_range_held_pointer_does_not_pop_earlier_project_history() {
     ui.key(egui::Key::Z, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert_range(&ui, 2.0, 3.0);
+}
+
+#[test]
+fn piano_range_overview_quarter_beat_drag_works_without_turning_jitter_into_ranges() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut ui = fixture();
+        ui.ctx.set_zoom_factor(scale);
+        reset_history(&mut ui);
+        assert_eq!(ui.app.piano_viewport.x.pixels_per_unit(), 24.0);
+        let before = project_fingerprint(&ui.app.project);
+        let selection = ui.app.piano_roll_state.selection_ids.clone();
+        let start = ruler(&ui, 0.25);
+        drag(
+            &mut ui,
+            start,
+            start + egui::vec2(1.0, 0.0),
+            piano_clipboard_command(),
+            piano_clipboard_command(),
+        );
+        assert!(
+            ui.app.piano_roll_state.repeat_range.is_none(),
+            "one-point pointer jitter at {scale}x must not select a range"
+        );
+        assert_eq!(ui.app.piano_roll_state.selection_ids, selection);
+        set_range(&mut ui, 0.25, 0.5);
+        assert_range(&ui, 0.25, 0.5);
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert!(ui.app.undo_stack.is_empty());
+    }
 }

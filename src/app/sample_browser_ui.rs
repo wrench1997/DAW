@@ -157,13 +157,15 @@ impl CitrusApp {
                     )
                     .on_hover_text(error);
                 }
-                ui.small("PCM 16/24/32-bit or float32 WAV. Audition is not available yet.");
+                ui.collapsing("Import help", |ui| {
+                    ui.small("PCM 16/24/32-bit or float32 WAV. Audition is not available yet.");
+                });
             }
             BrowserTab::Plugins => {
                 ui.small("Double-click to load into the selected Channel or Mixer.");
             }
             BrowserTab::Project => {
-                ui.small("Project items reflect the current arrangement. Use Project media / relink to manage audio references.");
+                ui.collapsing("Project help", |ui| { ui.small("Project items reflect the current arrangement. Use Project media / relink to manage audio references."); });
             }
         }
     }

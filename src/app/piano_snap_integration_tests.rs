@@ -138,6 +138,10 @@ fn piano_snap_dropdown_persists_local_preference_without_project_or_playlist_cha
 fn piano_range_actual_minimum_floating_window_has_usable_grid_and_controls() {
     let mut ui = UiHarness::floating();
     piano_clipboard_fixture(&mut ui);
+    // This regression covers the established larger note editing zoom at the
+    // minimum window size. The overview's 12 px rows have their own real
+    // pointer body/resize regression, rather than weakening this hitbox check.
+    ui.app.piano_viewport.y.zoom_at_pixel(0.0, 2.0).unwrap();
     ui.arrange_test_windows(
         &[(
             StudioView::PianoRoll,
@@ -228,7 +232,8 @@ fn piano_range_actual_minimum_floating_window_has_usable_grid_and_controls() {
     assert_eq!(ui.app.undo_stack.len(), 1);
     ui.key(egui::Key::Z, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), project);
-    ui.click("SCALE / CHORD v");
+    ui.click("NOTE EDIT v");
+    ui.click("SCALE / CHORD v ⏵");
     let shade = ui.app.piano_roll_state.scale_highlighting;
     ui.click("SHADE");
     assert_eq!(ui.app.piano_roll_state.scale_highlighting, !shade);
@@ -273,18 +278,14 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
         );
         assert_eq!(velocity.top(), grid.bottom());
         assert!(window.contains_rect(velocity));
-        for label in [
-            "NOTE EDIT v",
-            "SCALE / CHORD v",
-            "VIEW v",
-            "FIT NOTES",
-            "GHOST NOTES",
-        ] {
+        for label in ["NOTE EDIT v", "TOOLS v", "GHOST NOTES"] {
             let _ = ui.button(label);
         }
         assert!(!ui.nodes.iter().any(|n| n.label() == Some("Copy notes")));
         ui.capture(capture);
         ui.click("NOTE EDIT v");
+        let _ = ui.button("SCALE / CHORD v ⏵");
+        let _ = ui.button("VIEW v ⏵");
         for label in [
             "Copy notes",
             "Cut notes",
@@ -301,6 +302,7 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
     ui.app.piano_roll_state.snap_to_scale = true;
     ui.app.piano_roll_state.tool = PianoRollTool::Stamp;
     ui.settle();
+    ui.click("NOTE EDIT v");
     let label = ui
         .nodes
         .iter()
@@ -310,6 +312,7 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
     assert!(label.contains("LOCK"));
     assert!(label.contains(ui.app.piano_roll_state.chord_stamp.label()));
     ui.capture("piano-compact-scale-lock-stamp");
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
     ui.app.piano_roll_state.scale = PianoScale::ALL
         .into_iter()
         .max_by_key(|scale| scale.label().len())
@@ -356,4 +359,34 @@ fn piano_compact_toolbar_wide_and_breakpoint_keep_commands_and_state() {
         }
     }
     ui.capture("piano-compact-longest-lock-stamp-480");
+}
+
+#[test]
+fn piano_primary_toolbar_is_one_row_wide_and_two_rows_compact() {
+    let mut ui = snap_fixture();
+    for (width, max_span) in [(850.0, 4.0), (736.0, 4.0), (480.0, 34.0)] {
+        ui.arrange_test_windows(
+            &[(
+                StudioView::PianoRoll,
+                Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(width, 420.0)),
+            )],
+            StudioView::PianoRoll,
+        );
+        ui.settle();
+        let start = node_rect(ui.button("Pencil"));
+        let end = node_rect(ui.button("NOTE EDIT v"));
+        assert!(
+            (end.center().y - start.center().y).abs() <= max_span,
+            "Primary toolbar must use one row at 850/736pt and at most two at 480pt: width={width}, start={start:?}, end={end:?}"
+        );
+        let grid = ui.ctx.read_response(Id::new("piano-grid")).unwrap().rect;
+        assert!(grid.height() >= 144.0);
+        ui.click("TOOLS v");
+        let _ = ui.button("FIT NOTES");
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+        ui.click("NOTE EDIT v");
+        let _ = ui.button("VIEW v ⏵");
+        let _ = ui.button("Copy notes");
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    }
 }

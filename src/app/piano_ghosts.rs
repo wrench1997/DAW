@@ -3,6 +3,14 @@
 use super::*;
 use crate::piano_roll::PianoGhostSource;
 
+// A single editable voice uses a stable teal face, independent of the Channel's
+// arrangement color. References are cooler and deliberately lower contrast.
+pub(super) const NOTE_FACE: Color32 = Color32::from_rgb(76, 190, 166);
+pub(super) const NOTE_EDGE: Color32 = Color32::from_rgb(117, 219, 195);
+pub(super) const GHOST_FACE: Color32 = Color32::from_rgb(58, 76, 101);
+pub(super) const GHOST_EDGE: Color32 = Color32::from_rgb(83, 104, 133);
+pub(super) const ACTIVITY: Color32 = Color32::from_rgb(242, 167, 64);
+
 impl CitrusApp {
     /// Visual scroll extent only: reference tails never change the active Pattern,
     /// transport loop, Fit Notes target, or compiled playback timeline.
@@ -27,10 +35,18 @@ impl CitrusApp {
     pub(super) fn piano_ghost_controls(&mut self, ui: &mut egui::Ui) {
         let state = &mut self.piano_roll_state;
         state.ghost_source = state.ghost_source.resolved(&self.project.patterns);
-        ui.toggle_value(&mut state.ghosts_visible, "GHOST NOTES")
-            .on_hover_text(
-                "Show/hide read-only note outlines · Alt+V. Source selection is kept while hidden.",
-            );
+        let response = icons::icon_button(ui, StudioIcon::Group, state.ghosts_visible, 24.0);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                state.ghosts_visible,
+                "GHOST NOTES",
+            )
+        });
+        if response.on_hover_text("Ghost notes · Alt+V. Read-only blue-gray references; source is retained while hidden.").clicked() {
+            state.ghosts_visible = !state.ghosts_visible;
+        }
         let selected = match state.ghost_source {
             PianoGhostSource::CurrentPattern => "Current Pattern".to_owned(),
             PianoGhostSource::ReferencePattern(id) => self
@@ -65,11 +81,11 @@ impl CitrusApp {
         // Reserve the combo's width before its internal horizontal layout runs;
         // otherwise egui can grow a wrapped narrow toolbar instead of wrapping it.
         ui.allocate_ui_with_layout(
-            Vec2::new(128.0, ui.spacing().interact_size.y),
+            Vec2::new(100.0, ui.spacing().interact_size.y),
             Layout::left_to_right(Align::Center),
             |ui| {
         egui::ComboBox::from_id_salt("piano-ghost-source")
-            .width(128.0)
+            .width(100.0)
             .truncate()
             .selected_text(selected)
             .show_ui(ui, |ui| {
@@ -116,18 +132,21 @@ impl CitrusApp {
                 continue;
             }
             let (_, rect, _, _) = piano_mouse::note_rects(grid, self.piano_viewport, note);
-            // Neutral cool outlines distinguish ghosts from solid Channel-colored
-            // editable notes, even when the reference uses the same Channel.
-            painter.rect_filled(
-                rect,
-                1.0,
-                Color32::from_rgba_unmultiplied(158, 183, 211, 32),
-            );
-            painter.rect_stroke(
-                rect,
-                1.0,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(158, 183, 211, 150)),
-                StrokeKind::Inside,
+            // Filled blue-gray reference silhouettes have no handles or widgets.
+            // Their muted face and single top highlight remain distinct from the
+            // brighter teal editable voice, including same-Channel references.
+            let fill = if note.muted {
+                GHOST_FACE.gamma_multiply(0.65)
+            } else {
+                GHOST_FACE
+            };
+            painter.rect_filled(rect, 1.0, fill);
+            painter.line_segment(
+                [
+                    rect.left_top() + Vec2::new(0.5, 0.5),
+                    rect.right_top() + Vec2::new(-0.5, 0.5),
+                ],
+                Stroke::new(0.7, GHOST_EDGE),
             );
         }
     }

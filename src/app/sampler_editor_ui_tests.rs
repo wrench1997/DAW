@@ -24,6 +24,40 @@ fn sampler_fixture(ui: &mut UiHarness) {
     ui.settle();
 }
 
+fn sampler_advanced(ui: &mut UiHarness) {
+    let position = ui.app.sampler_drop_rect().unwrap().center();
+    ui.run(vec![
+        egui::Event::PointerMoved(position),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: Vec2::new(0.0, -600.0),
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    for _ in 0..12 {
+        ui.run(Vec::new());
+    }
+    ui.click("Advanced");
+    let position = ui
+        .ctx
+        .memory(|m| m.area_rect(Id::new("native-sampler-editor")))
+        .unwrap()
+        .center();
+    ui.run(vec![
+        egui::Event::PointerMoved(position),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: Vec2::new(0.0, -600.0),
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    for _ in 0..12 {
+        ui.run(Vec::new());
+    }
+}
+
 #[test]
 fn sampler_editor_real_input_loop_remove_undo_and_narrow_bounds() {
     for width in [760.0, 1080.0, 1440.0] {
@@ -59,6 +93,7 @@ fn sampler_editor_real_input_loop_remove_undo_and_narrow_bounds() {
             ui.app.project.channels[0].sampler.unwrap().loop_end_frame,
             Some(48000)
         );
+        sampler_advanced(&mut ui);
         ui.click("Remove sample");
         assert_eq!(ui.app.project.channels[0].sampler.unwrap().asset_id, None);
         ui.app.undo();
@@ -236,14 +271,14 @@ fn sampler_window_controls_remain_inside_short_viewport() {
     assert!(
         ui.ctx
             .content_rect()
-            .contains_rect(node_rect(ui.button("Remove sample")))
+            .contains_rect(node_rect(ui.button("Preview (short note)")))
     );
     let scroll_position = ui.app.sampler_drop_rect().unwrap().center();
     ui.run(vec![egui::Event::PointerMoved(scroll_position)]);
     assert_eq!(
         ui.ctx.layer_id_at(scroll_position),
         Some(egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::Middle,
             Id::new("native-sampler-editor")
         )),
         "workspace restacking must not cover the sampler"
@@ -261,10 +296,15 @@ fn sampler_window_controls_remain_inside_short_viewport() {
         ui.run(Vec::new());
     }
     ui.capture("sampler-short-after-scroll");
-    let preview = node_rect(ui.button("Preview (short note)"));
+    let preview = node_rect(
+        ui.nodes
+            .iter()
+            .find(|n| n.role() == Role::Slider && n.label() == Some("Sustain"))
+            .unwrap(),
+    );
     assert!(
         ui.ctx.content_rect().contains_rect(preview),
-        "short windows must scroll to the audition control: preview={preview:?}, viewport={:?}, scroll_position={scroll_position:?}",
+        "short windows must scroll to the envelope controls: preview={preview:?}, viewport={:?}, scroll_position={scroll_position:?}",
         ui.ctx.content_rect()
     );
 }
@@ -415,6 +455,7 @@ fn sampler_remove_keeps_silence_and_native_synth_requires_explicit_undoable_acti
     let mut ui = UiHarness::with_storage(None, false);
     sampler_fixture(&mut ui);
     let loaded = ui.app.project.channels[0].sampler;
+    sampler_advanced(&mut ui);
     ui.click("Remove sample");
     assert_eq!(
         ui.app.project.channels[0].sampler,
@@ -500,25 +541,34 @@ fn sampler_open_and_scroll_preserve_exact_saved_envelope_and_full_end() {
             ui.run(Vec::new());
         }
         assert!(
-            ui.ctx
-                .content_rect()
-                .contains_rect(node_rect(ui.button("Preview (short note)")))
+            ui.ctx.content_rect().contains_rect(node_rect(
+                ui.nodes
+                    .iter()
+                    .find(|n| n.role() == Role::Slider && n.label() == Some("Sustain"))
+                    .unwrap()
+            ))
         );
+        let sampler_bounds = ui
+            .ctx
+            .memory(|m| m.area_rect(Id::new("native-sampler-editor")))
+            .unwrap();
         let close = ui
             .nodes
             .iter()
             .find(|node| {
                 node.label() == Some("Close window")
                     && node.bounds().is_some_and(|_| {
-                        ui.ctx.layer_id_at(node_rect(node).center())
-                            == Some(egui::LayerId::new(
-                                egui::Order::Foreground,
-                                Id::new("native-sampler-editor"),
-                            ))
+                        node_rect(node).center().y < sampler_bounds.top() + 36.0
+                            && ui.ctx.layer_id_at(node_rect(node).center())
+                                == Some(egui::LayerId::new(
+                                    egui::Order::Middle,
+                                    Id::new("native-sampler-editor"),
+                                ))
                     })
             })
             .expect("Sampler close button must be accessible");
-        ui.click_pos(node_rect(close).center());
+        let close_rect = node_rect(close);
+        ui.click_pos(close_rect.center());
         ui.settle();
         assert!(
             !ui.nodes
@@ -530,4 +580,254 @@ fn sampler_open_and_scroll_preserve_exact_saved_envelope_and_full_end() {
         assert_eq!(project_fingerprint(&ui.app.project), before);
         assert!(ui.app.undo_stack.is_empty());
     }
+}
+
+#[test]
+fn sampler_rotary_envelope_controls_are_named_and_do_not_edit_on_display() {
+    for (width, height, scale) in [(760.0, 720.0, 1.0), (1440.0, 900.0, 1.5)] {
+        let mut ui = UiHarness::with_storage(None, false);
+        ui.size = Vec2::new(width, height);
+        ui.ctx.set_zoom_factor(scale);
+        sampler_fixture(&mut ui);
+        let before = project_fingerprint(&ui.app.project);
+        let position = ui.app.sampler_drop_rect().unwrap().center();
+        ui.run(vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
+                delta: Vec2::new(0.0, -600.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        for _ in 0..12 {
+            ui.run(Vec::new());
+        }
+        for label in ["Attack", "Decay", "Sustain", "Release"] {
+            let knob = ui
+                .nodes
+                .iter()
+                .find(|node| node.role() == Role::Slider && node.label() == Some(label))
+                .expect("ADSR dial is an accessible slider");
+            assert!(!knob.is_disabled());
+            assert!(
+                ui.ctx.content_rect().contains_rect(node_rect(knob)),
+                "{label} must fit at scale {scale}"
+            );
+        }
+        ui.capture(if scale > 1.0 {
+            "sampler-rotary-hidpi"
+        } else {
+            "sampler-rotary-compact"
+        });
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert!(ui.app.undo_stack.is_empty());
+    }
+}
+
+#[test]
+fn sampler_rotary_drag_escape_cancels_without_history() {
+    let mut ui = UiHarness::with_storage(None, false);
+    sampler_fixture(&mut ui);
+    let before = project_fingerprint(&ui.app.project);
+    let knob = ui
+        .nodes
+        .iter()
+        .find(|node| node.role() == Role::Slider && node.label() == Some("Sustain"))
+        .unwrap();
+    let bounds = node_rect(knob);
+    let position = Pos2::new(bounds.left() + bounds.width() * 0.25, bounds.center().y);
+    ui.run(vec![
+        egui::Event::PointerMoved(position),
+        egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    assert!(ui.app.sampler_gesture_active());
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    ui.run(vec![egui::Event::PointerButton {
+        pos: position,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    ui.settle();
+    assert!(!ui.app.sampler_gesture_active());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+}
+
+#[test]
+fn sampler_empty_loaded_layout_transition_restores_each_mode_size() {
+    let mut ui = UiHarness::with_storage(None, false);
+    ui.size = Vec2::new(1440.0, 900.0);
+    let channel_id = ui.app.project.channels[0].id;
+    ui.app.project.channels[0].instrument_plugin_instance_id = None;
+    ui.app.project.channels[0].sampler = Some(SamplerConfig::empty());
+    ui.app.open_sampler(channel_id);
+    ui.settle();
+    let bounds = |ui: &UiHarness| {
+        ui.ctx
+            .memory(|m| m.area_rect(Id::new("native-sampler-editor")))
+            .unwrap()
+    };
+    let empty = bounds(&ui);
+    assert!(
+        empty.height() < 300.0,
+        "empty Sampler should be compact: {empty:?}"
+    );
+    sampler_fixture(&mut ui);
+    let loaded = bounds(&ui);
+    assert!(
+        loaded.height() > empty.height() + 100.0,
+        "loading must grow to show the instrument: empty={empty:?}, loaded={loaded:?}"
+    );
+    for label in ["Attack", "Decay", "Sustain", "Release"] {
+        let knob = ui
+            .nodes
+            .iter()
+            .find(|n| n.role() == Role::Slider && n.label() == Some(label))
+            .unwrap();
+        assert!(
+            loaded.contains_rect(node_rect(knob)),
+            "loaded window must show {label} without opening Advanced"
+        );
+    }
+    sampler_advanced(&mut ui);
+    ui.click("Remove sample");
+    ui.settle();
+    assert!(
+        (bounds(&ui).height() - empty.height()).abs() < 4.0,
+        "removing restores compact mode size"
+    );
+    ui.app.undo();
+    ui.settle();
+    assert!(
+        (bounds(&ui).height() - loaded.height()).abs() < 4.0,
+        "undo restores loaded size"
+    );
+}
+
+#[test]
+fn sampler_arrange_repositions_at_new_viewport_without_changing_instrument() {
+    let mut ui = UiHarness::with_storage(None, false);
+    ui.size = Vec2::new(1180.0, 800.0);
+    sampler_fixture(&mut ui);
+    let bounds = |ui: &UiHarness| {
+        ui.ctx
+            .memory(|m| m.area_rect(Id::new("native-sampler-editor")))
+            .unwrap()
+    };
+    let initial = bounds(&ui);
+    let before = project_fingerprint(&ui.app.project);
+    ui.size = Vec2::new(1364.0, 1000.0);
+    ui.settle();
+    let retained = bounds(&ui);
+    assert!(
+        (retained.top() - initial.top()).abs() < 2.0,
+        "resize alone must retain manual window position"
+    );
+    ui.workspace_action("Arrange windows");
+    ui.settle();
+    let arranged = bounds(&ui);
+    let viewport = ui.ctx.content_rect();
+    let workspace_bounds = ui.app.workspace.bounds.unwrap();
+    assert!(
+        arranged.right() <= workspace_bounds.left() + workspace_bounds.width() * 0.35 - 5.0,
+        "Arrange must leave the Piano left edge unobstructed: {arranged:?}"
+    );
+    let expected = Pos2::new(
+        (viewport.left() + viewport.width() * 0.12)
+            .min(workspace_bounds.left() + workspace_bounds.width() * 0.35 - 490.0 - 8.0)
+            .max(viewport.left() + 8.0),
+        {
+            let bounds = ui.app.workspace.bounds.unwrap();
+            (bounds.top() + bounds.height() * 0.78 - 490.0 - 8.0).max(viewport.top() + 96.0)
+        },
+    );
+    assert!(
+        (arranged.min - expected).length() < 3.0,
+        "Arrange should recompose Sampler: {arranged:?}, expected {expected:?}"
+    );
+    assert!(
+        (arranged.size() - retained.size()).length() < 3.0,
+        "Arrange must not reset user size"
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+    ui.settle();
+    assert!(
+        (bounds(&ui).min - arranged.min).length() < 1.0,
+        "one-shot position remains stable"
+    );
+}
+
+#[test]
+fn sampler_numeric_typing_is_one_transaction_and_escape_cancels_all_digits() {
+    let mut ui = UiHarness::with_storage(None, false);
+    sampler_fixture(&mut ui);
+    let before = project_fingerprint(&ui.app.project);
+    let attack_position = |ui: &UiHarness| {
+        let knob = node_rect(
+            ui.nodes
+                .iter()
+                .find(|n| n.role() == Role::Slider && n.label() == Some("Attack"))
+                .unwrap(),
+        );
+        let numeric = ui
+            .nodes
+            .iter()
+            .filter(|n| n.role() == Role::SpinButton)
+            .map(node_rect)
+            .filter(|r| r.top() > knob.bottom() && (r.center().x - knob.center().x).abs() < 10.0)
+            .min_by(|a, b| a.top().total_cmp(&b.top()))
+            .unwrap();
+        numeric.center()
+    };
+    let type_number = |ui: &mut UiHarness| {
+        ui.click_pos(attack_position(ui));
+        assert!(ui.ctx.text_edit_focused());
+        ui.key(egui::Key::A, piano_clipboard_command());
+        for text in ["0", ".", "2", "5", "0"] {
+            ui.run(vec![egui::Event::Text(text.into())]);
+            ui.run(vec![]);
+            assert!(
+                ui.app.undo_stack.is_empty(),
+                "typing {text} must not commit an intermediate value"
+            );
+        }
+    };
+    type_number(&mut ui);
+    ui.key(egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    assert!((ui.app.project.channels[0].sampler.unwrap().attack_seconds - 0.25).abs() < 0.0001);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    type_number(&mut ui);
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    ui.settle();
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+}
+
+#[test]
+fn sampler_window_uses_middle_layer_so_file_menu_stays_above() {
+    let mut ui = UiHarness::with_storage(None, false);
+    sampler_fixture(&mut ui);
+    let sampler = egui::LayerId::new(egui::Order::Middle, Id::new("native-sampler-editor"));
+    assert_eq!(
+        ui.ctx
+            .layer_id_at(ui.app.sampler_drop_rect().unwrap().center()),
+        Some(sampler)
+    );
+    ui.click("FILE");
+    ui.settle();
+    let export = node_rect(ui.button("Export WAV…"));
+    assert_eq!(
+        ui.ctx.layer_id_at(export.center()).unwrap().order,
+        egui::Order::Foreground
+    );
 }

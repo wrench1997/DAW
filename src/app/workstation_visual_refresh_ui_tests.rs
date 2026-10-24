@@ -39,6 +39,7 @@ fn workstation_refresh_melody_pointer_repeat_undo_and_compact_layout() {
     assert_eq!(project_fingerprint(&ui.app.project), authored);
     ui.key(egui::Key::Y, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), repeated);
+    ui.click("TOOLS v");
     ui.click("FIT NOTES");
     ui.key(egui::Key::D, piano_clipboard_command());
     let note = ui.app.project.active_pattern().notes.last().unwrap().id;
@@ -66,8 +67,9 @@ fn workstation_refresh_melody_pointer_repeat_undo_and_compact_layout() {
 
     ui.size = Vec2::new(1080.0, 680.0);
     ui.settle();
+    ui.click("TOOLS v");
     ui.click("FIT NOTES");
-    for label in ["PIANO", "MIXER", "WINDOWS", "FIT NOTES", "NOTE EDIT v"] {
+    for label in ["PIANO", "MIXER", "WINDOWS", "TOOLS v", "NOTE EDIT v"] {
         let rect = node_rect(ui.button(label));
         assert!(
             ui.ctx.content_rect().contains_rect(rect),

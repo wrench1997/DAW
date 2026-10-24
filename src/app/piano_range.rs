@@ -281,8 +281,16 @@ impl CitrusApp {
                 )
             });
             if let (Some(g), Some(pointer)) = (gesture.as_mut(), pointer) {
-                g.moved |= (pointer.x - g.pointer.x).abs()
-                    > ctx.options(|o| o.input_options.max_click_dist);
+                // An explicitly armed ruler gesture must remain usable at overview
+                // density: a quarter beat is only six logical pixels. Keep the
+                // ordinary click threshold for unarmed input and all note tools.
+                let click_distance = ctx.options(|o| o.input_options.max_click_dist);
+                let threshold = if g.armed {
+                    click_distance.min(2.0)
+                } else {
+                    click_distance
+                };
+                g.moved |= (pointer.x - g.pointer.x).abs() > threshold;
             }
             if let (Some(g), Some(pointer)) = (&gesture, pointer)
                 && g.armed

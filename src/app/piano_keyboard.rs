@@ -273,19 +273,19 @@ fn face_color(black: bool, state: KeyState) -> Color32 {
     let rest = if black {
         Color32::from_rgb(25, 30, 37)
     } else {
-        Color32::from_rgb(205, 210, 213)
+        Color32::from_rgb(191, 201, 207)
     };
     if state.pressed {
         if black {
-            Color32::from_rgb(177, 113, 51)
+            Color32::from_rgb(177, 118, 48)
         } else {
-            Color32::from_rgb(247, 181, 107)
+            Color32::from_rgb(242, 181, 96)
         }
     } else if state.playing {
         if black {
-            Color32::from_rgb(45, 83, 117)
+            Color32::from_rgb(39, 111, 98)
         } else {
-            Color32::from_rgb(138, 180, 212)
+            Color32::from_rgb(125, 205, 185)
         }
     } else if state.hovered {
         theme::mix(rest, theme::BLUE, if black { 0.20 } else { 0.10 })
